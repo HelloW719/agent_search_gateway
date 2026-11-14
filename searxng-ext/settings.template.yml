@@ -1,10 +1,10 @@
-# agent_search_gateway —— searxng 容器配置模板
+# agent_search_gateway —— searxng 配置模板
 #
-# 由 docker/searxng/entrypoint.sh 在启动时用环境变量替换 $VAR 后写到
-# /etc/searxng/settings.yml。密钥只经环境变量注入，不进镜像。
+# 一键安装器（scripts/install/deps/searxng.mjs）读取本模板，替换 ${VAR}
+# 占位符后生成 data/deps/searxng/settings.yml。密钥只经环境变量注入，不写进仓库。
 #
 #   ${EXA_API_KEY}        —— exaapi 引擎（上游引擎只认 settings.yml）
-#   ${SEARXNG_SECRET_KEY} —— server.secret_key（缺省由 entrypoint 随机生成）
+#   ${SEARXNG_SECRET_KEY} —— server.secret_key（缺省由安装器随机生成）
 #
 # tavily / zhihu 引擎改读环境变量（TAVILY_API_KEY / ZHIHU_ACCESS_SECRET），
 # 此处留空即可。
@@ -28,8 +28,8 @@ outgoing:
   # 不再走代理：API 引擎直连可达，且内置通用爬虫已整体 disabled。
 
 server:
-  port: 8080
-  bind_address: "0.0.0.0"
+  port: 8888
+  bind_address: "127.0.0.1"
   secret_key: "${SEARXNG_SECRET_KEY}"
   limiter: false
   public_instance: false

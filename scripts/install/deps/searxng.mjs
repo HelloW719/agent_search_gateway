@@ -2,17 +2,15 @@
  * searxng 安装模块（一键安装器依赖）。
  *
  * 模式：
- *   - docker  ：官方镜像 searxng/searxng + docker compose（Linux/macOS 默认，需 Docker）
- *   - native  ：pins.archive 源码 + venv + granian（Windows 默认；无 Docker 时回退）
+ *   - auto    ：等同 native（0.3.4 起不再支持 Docker 部署）
+ *   - native  ：pins.archive 源码 + venv + granian（唯一的本地安装方式）
  *   - external：连接已有 searxng，不安装
  *
  * 目录：<root>/data/deps/searxng/
  *   ├─ settings.yml      生成的配置（含自定义引擎/插件）
- *   ├─ compose.yaml      Docker 模式
  *   ├─ src/              原生源码（pins.searxng.commit）
  *   ├─ venv/             原生 Python 虚拟环境
  *   ├─ ext/              从 searxng-ext 复制出的引擎/插件
- *   ├─ quota/            配额台账目录（挂给容器）
  *   ├─ cache/            下载缓存（源码 ZIP、Windows Python 安装包）
  *   └─ install.json      安装记录（模式/版本/端口）
  *
@@ -33,8 +31,6 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** 完整包 / 仓库根（scripts/install/deps 的上三级） */
 const PACKAGE_ROOT = path.resolve(HERE, '..', '..', '..');
 const DEPS_REL = path.join('data', 'deps', 'searxng');
-const DOCKER_IMAGE = 'searxng/searxng:latest';
-const DOCKER_PROJECT = 'agent-search-searxng';
 const MIN_PYTHON = [3, 11];
 const WINDOWS_PYTHON_VERSION = '3.12.10';
 const WINDOWS_PYTHON_URL =
@@ -178,10 +174,29 @@ function venvPythonPath(venvDir, platform) {
 // ---------------------------------------------------------------------------
 
 async function loadTemplate(root) {
-  const file = await resolveProjectPath(root, path.join('docker', 'searxng', 'settings.template.yml'), {
+  const file = await resolveProjectPath(root, path.join('searxng-ext', 'settings.template.yml'), {
     required: true,
   });
   return { file, text: await fs.readFile(file, 'utf8') };
+}
+
+/**
+ * 配额种子配置：searxng quota 插件与网关共用 ~/.config/agent-search/。
+ * 只在用户尚无配置时写入，避免覆盖已有额度设置。
+ */
+async function seedQuotaConfig(root, logger) {
+  const seed = await resolveProjectPath(root, path.join('searxng-ext', 'quota.config.json'));
+  if (!seed) return null;
+  const target = path.join(os.homedir(), '.config', 'agent-search', 'quota.config.json');
+  if (await exists(target)) return target;
+  try {
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(seed, target);
+    logger(`已写入配额种子配置: ${target}`);
+  } catch (error) {
+    logger(`写入配额种子配置失败（忽略）：${error.message}`);
+  }
+  return target;
 }
 
 async function resolveExtDir(root) {
@@ -311,211 +326,6 @@ async function writeSettings({
   await writeAtomic(settingsPath, text, mode);
   logger(`已生成配置: ${settingsPath}`);
   return text;
-}
-
-async function copyExtFiles({ root, extDir, depsDir, logger }) {
-  const enginesSrc = path.join(extDir, 'searx', 'engines');
-  const pluginsSrc = path.join(extDir, 'searx', 'plugins');
-  const enginesDest = path.join(depsDir, 'ext', 'searx', 'engines');
-  const pluginsDest = path.join(depsDir, 'ext', 'searx', 'plugins');
-  await fs.mkdir(enginesDest, { recursive: true });
-  await fs.mkdir(pluginsDest, { recursive: true });
-
-  const copied = [];
-  const engineFiles = (await fs.readdir(enginesSrc)).filter(
-    (name) => name.endsWith('.py') && !name.startsWith('__'),
-  );
-  for (const name of engineFiles) {
-    const target = path.join(enginesDest, name);
-    await fs.copyFile(path.join(enginesSrc, name), target);
-    copied.push({ kind: 'engine', name, path: target });
-  }
-
-  const quota = path.join(pluginsSrc, 'quota.py');
-  if (!(await exists(quota))) {
-    throw new Error(`searxng-ext 缺少配额插件：${quota}`);
-  }
-  const quotaTarget = path.join(pluginsDest, 'quota.py');
-  await fs.copyFile(quota, quotaTarget);
-  copied.push({ kind: 'plugin', name: 'quota.py', path: quotaTarget });
-
-  logger(`已准备 ${engineFiles.length} 个自定义引擎 + quota 插件`);
-  return copied;
-}
-
-// ---------------------------------------------------------------------------
-// Docker 模式
-// ---------------------------------------------------------------------------
-
-async function dockerUsable() {
-  const info = await run('docker', ['info', '--format', '{{.ServerVersion}}'], { timeout: 15000 });
-  if (info.code !== 0) return false;
-  const compose = await run('docker', ['compose', 'version'], { timeout: 15000 });
-  return compose.code === 0;
-}
-
-async function dockerCompose(args, cwd, logger, { ignoreError = false } = {}) {
-  const result = await run('docker', ['compose', ...args], {
-    cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 300000,
-  });
-  const detail = `${result.stdout || ''}${result.stderr || ''}`.trim();
-  if (result.error) {
-    if (ignoreError) return result;
-    throw new Error(`无法执行 docker compose：${result.error.message}`);
-  }
-  if (result.code !== 0) {
-    if (ignoreError) {
-      logger(`docker compose 退出码 ${result.code}${detail ? `：${detail.slice(-500)}` : ''}`);
-      return result;
-    }
-    throw new Error(
-      `docker compose 失败（退出码 ${result.code}）：${detail.slice(-1000) || '(无输出)'}`,
-    );
-  }
-  return result;
-}
-
-async function buildCompose({ depsDir, settingsPath, port, extFiles, quotaDir, image }) {
-  const volumes = [`${settingsPath}:/etc/searxng/settings.yml:ro`];
-  for (const item of extFiles) {
-    if (item.kind === 'engine') {
-      volumes.push(`${item.path}:/usr/local/searxng/searx/engines/${item.name}:ro`);
-    } else {
-      volumes.push(`${item.path}:/usr/local/searxng/searx/plugins/${item.name}:ro`);
-    }
-  }
-  volumes.push(`${quotaDir}:/quota`);
-
-  const compose = {
-    name: DOCKER_PROJECT,
-    services: {
-      searxng: {
-        image,
-        container_name: `${DOCKER_PROJECT}-deps`,
-        restart: 'unless-stopped',
-        ports: [`127.0.0.1:${port}:8080`],
-        environment: {
-          TZ: process.env.TZ || 'Asia/Shanghai',
-          SEARXNG_BASE_URL: `http://127.0.0.1:${port}/`,
-          QUOTA_LEDGER_PATH: '/quota/quota.json',
-          QUOTA_CONFIG_PATH: '/quota/quota.config.json',
-        },
-        volumes,
-        healthcheck: {
-          test: [
-            'CMD',
-            '/usr/local/searxng/.venv/bin/python',
-            '-c',
-            "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=3).status==200 else 1)",
-          ],
-          interval: '10s',
-          timeout: '5s',
-          retries: 18,
-          start_period: '30s',
-        },
-      },
-    },
-  };
-  return stringifyYaml(compose, { lineWidth: 0 });
-}
-
-async function waitHealth(url, timeoutMs, logger) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = '';
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${url}${HEALTH_PATH}`, { signal: AbortSignal.timeout(3000) });
-      if (res.ok) return { ok: true, status: res.status };
-      lastError = `HTTP ${res.status}`;
-    } catch (error) {
-      lastError = error?.message || String(error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  logger(`健康检查超时（最后一次错误：${lastError || '未知'}）`);
-  return { ok: false, error: lastError };
-}
-
-async function installDocker({ root, platform, pins, options, depsDir, logger }) {
-  if (!(await dockerUsable())) {
-    throw new Error(
-      '未检测到可用的 Docker（或 docker compose 插件）。请安装 Docker Desktop / Docker Engine，' +
-        '或使用 --searxng-mode native 改用源码方式。',
-    );
-  }
-
-  const port = options.port || 8888;
-  const image =
-    (pins.searxng.dockerImage && String(pins.searxng.dockerImage).trim()) || DOCKER_IMAGE;
-  const template = await loadTemplate(root);
-  const extDir = await resolveExtDir(root);
-  const settingsPath = path.join(depsDir, 'settings.yml');
-  const quotaDir = path.join(depsDir, 'quota');
-  await fs.mkdir(quotaDir, { recursive: true });
-
-  // 配额种子配置（不要覆盖已有台账）
-  const quotaSeed = await resolveProjectPath(root, path.join('docker', 'searxng', 'quota.config.json'));
-  const quotaConfig = path.join(quotaDir, 'quota.config.json');
-  if (quotaSeed && !(await exists(quotaConfig))) {
-    await fs.copyFile(quotaSeed, quotaConfig);
-  }
-
-  await writeSettings({
-    root,
-    settingsPath,
-    templateText: template.text,
-    port: 8080,
-    bindAddress: '0.0.0.0',
-    options,
-    logger,
-    mode: 0o644,
-  });
-
-  const extFiles = await copyExtFiles({ root, extDir, depsDir, logger });
-  const composePath = path.join(depsDir, 'compose.yaml');
-  const composeText = await buildCompose({
-    depsDir,
-    settingsPath,
-    port,
-    extFiles,
-    quotaDir,
-    image,
-  });
-  await writeAtomic(composePath, composeText);
-
-  logger(`启动 Docker 容器（127.0.0.1:${port} -> 8080）...`);
-  await dockerCompose(
-    ['-p', DOCKER_PROJECT, '-f', composePath, 'up', '-d', '--remove-orphans'],
-    depsDir,
-    logger,
-  );
-
-  const url = `http://127.0.0.1:${port}`;
-  logger('等待 searxng 健康检查 ...');
-  const health = await waitHealth(url, 180000, logger);
-  if (!health.ok) {
-    throw new Error(
-      `searxng 容器已启动但健康检查失败（${url}${HEALTH_PATH}）。` +
-        `请查看日志：docker compose -f ${composePath} logs`,
-    );
-  }
-
-  const version = pins.searxng.commit;
-  await writeJson(path.join(depsDir, 'install.json'), {
-    mode: 'docker',
-    version,
-    commit: version,
-    image,
-    port,
-    url,
-    installed_at: new Date().toISOString(),
-    platform,
-  });
-
-  logger(`searxng（Docker）已就绪: ${url}`);
-  return { mode: 'docker', url, version, launch: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -861,6 +671,9 @@ async function installNative({ root, platform, pins, options, depsDir, logger })
     logger,
   });
 
+  // 配额种子配置（不覆盖用户已有配置）
+  await seedQuotaConfig(root, logger);
+
   const url = `http://127.0.0.1:${port}`;
   const launch = {
     command: [venvPython, '-m', 'granian', 'searx.webapp:app'],
@@ -903,7 +716,7 @@ async function installNative({ root, platform, pins, options, depsDir, logger })
  * 安装 searxng。
  *
  * @param {{ root: string, platform: string, pins: object, options?: object, logger?: Function }} params
- * @returns {Promise<{ mode: 'docker'|'native'|'external', url: string, version: string, launch: object|null }>}
+ * @returns {Promise<{ mode: 'native'|'external', url: string, version: string, launch: object|null }>}
  */
 export async function installSearxng({ root, platform, pins, options = {}, logger } = {}) {
   const log = makeLogger(logger);
@@ -928,51 +741,25 @@ export async function installSearxng({ root, platform, pins, options = {}, logge
     log(`使用已有 searxng: ${url}`);
     return { mode: 'external', url, version: 'external', launch: null };
   }
-  if (!['auto', 'docker', 'native'].includes(mode)) {
-    throw new Error(`未知的 searxng 安装模式：${mode}（可选 auto | docker | native | external）`);
+  if (!['auto', 'native'].includes(mode)) {
+    throw new Error(
+      `未知的 searxng 安装模式：${mode}（0.3.4 起不再支持 Docker 部署，可选 auto | native | external）`,
+    );
   }
 
   await fs.mkdir(depsDir, { recursive: true });
 
-  let resolved = mode;
   if (mode === 'auto') {
-    // Docker 模式保留给显式指定，auto 一律走 native。
-    resolved = 'native';
-    log(`auto 模式选择：${resolved}`);
-  }
-  if (mode === 'docker' && platform.startsWith('win32')) {
-    log('Windows 默认使用原生模式，忽略 docker 模式请求');
-    resolved = 'native';
-  }
-
-  if (resolved === 'docker') {
-    try {
-      return await installDocker({ root, platform, pins, options, depsDir, logger: log });
-    } catch (error) {
-      if (mode !== 'auto') throw error;
-      log(`Docker 启动失败，回退原生模式：${error.message}`);
-      return installNative({ root, platform, pins, options, depsDir, logger: log });
-    }
+    log('auto 模式选择：native');
   }
   return installNative({ root, platform, pins, options, depsDir, logger: log });
 }
 
-/** 卸载：停止 compose 容器（若存在）并删除 data/deps/searxng。 */
+/** 卸载：删除 data/deps/searxng。 */
 export async function uninstallSearxng({ root, platform, options = {}, logger } = {}) {
   const log = makeLogger(logger);
   if (!root) throw new Error('uninstallSearxng 缺少 root 参数');
   const depsDir = path.join(root, DEPS_REL);
-  const composePath = path.join(depsDir, 'compose.yaml');
-
-  if (await exists(composePath)) {
-    log('停止 searxng 容器 ...');
-    await dockerCompose(
-      ['-p', DOCKER_PROJECT, '-f', composePath, 'down', '--remove-orphans', '-v'],
-      depsDir,
-      log,
-      { ignoreError: true },
-    );
-  }
 
   if (await exists(depsDir)) {
     await fs.rm(depsDir, { recursive: true, force: true });

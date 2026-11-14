@@ -37,7 +37,7 @@ const USAGE = `用法: node scripts/install/cli.mjs --install-root <目录> [选
   --port <n>              网关端口（默认 3000）
   --searxng-port <n>      searxng 端口（默认 8888）
   --flaresolverr-port <n> FlareSolverr 端口（默认 8192）
-  --searxng-mode <mode>   auto | docker | native | external（默认 auto = native）
+  --searxng-mode <mode>   auto | native | external（默认 auto = native；0.3.4 起不支持 Docker）
   --searxng-url <url>     连接已有 searxng（隐含 external）
   --flaresolverr-url <url> 连接已有 FlareSolverr
   --no-deps               不安装 searxng / FlareSolverr
@@ -144,6 +144,11 @@ export function parseArgs(argv) {
     if (!Number.isInteger(value) || value < 1 || value > 65535) {
       throw new Error(`${key} 不是合法端口: ${value}`);
     }
+  }
+  if (!['auto', 'native', 'external'].includes(opts.searxngMode)) {
+    throw new Error(
+      `--searxng-mode 只支持 auto | native | external（0.3.4 起不再支持 Docker）: ${opts.searxngMode}`,
+    );
   }
   return opts;
 }

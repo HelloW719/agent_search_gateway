@@ -2,8 +2,7 @@
   "searxng": {
     "commit": "57ff753ad416b7bf27e59d72ae8c7cac93b56be4",
     "archive": "https://github.com/searxng/searxng/archive/57ff753ad416b7bf27e59d72ae8c7cac93b56be4.zip",
-    "sha256": "0b22645df495343e39f151b9e29439c6cfb51a11af32363c4cc5848366463e3e",
-    "dockerImage": "searxng/searxng:2026.11.9-57ff753ad"
+    "sha256": "0b22645df495343e39f151b9e29439c6cfb51a11af32363c4cc5848366463e3e"
   },
   "flaresolverr": {
     "version": "v3.5.2",

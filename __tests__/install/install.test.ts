@@ -3,6 +3,8 @@ import { prepareConfig } from "../../scripts/install/config.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import { parseArgs, platformTag } from "../../scripts/install/cli.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
+import { installSearxng } from "../../scripts/install/deps/searxng.mjs";
+// @ts-expect-error 纯 JS 安装脚本没有类型声明
 import { buildHeaders, proxyEnvName, sha256File, verifySha256 } from "../../scripts/install/http.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import {
@@ -64,6 +66,49 @@ describe("安装器参数与平台", () => {
 
   it("拒绝未知参数", () => {
     expect(() => parseArgs(["--nope"])).toThrow(/未知参数/);
+  });
+
+  it("--searxng-mode 只接受 auto | native | external", () => {
+    for (const mode of ["auto", "native", "external"]) {
+      expect(parseArgs(["--searxng-mode", mode]).searxngMode).toBe(mode);
+    }
+    expect(() => parseArgs(["--searxng-mode", "docker"])).toThrow(/auto \| native \| external/);
+  });
+});
+
+describe("searxng 安装资源", () => {
+  const pins = {
+    searxng: {
+      commit: "abc",
+      archive: "https://example.com/searxng.zip",
+      sha256: "0".repeat(64),
+    },
+  };
+
+  it("settings 模板与 quota 种子已迁到 searxng-ext", () => {
+    const template = join(ROOT, "searxng-ext/settings.template.yml");
+    const quota = join(ROOT, "searxng-ext/quota.config.json");
+    expect(existsSync(template)).toBe(true);
+    expect(existsSync(quota)).toBe(true);
+    expect(parse(readFileSync(template, "utf8")).use_default_settings).toBe(true);
+    expect(Object.keys(parse(readFileSync(quota, "utf8")).engines).length).toBeGreaterThan(0);
+
+    const source = readFileSync(join(ROOT, "scripts/install/deps/searxng.mjs"), "utf8");
+    expect(source).toContain("'searxng-ext', 'settings.template.yml'");
+    expect(source).toContain("'searxng-ext', 'quota.config.json'");
+    expect(source).not.toMatch(/installDocker|dockerCompose|dockerUsable/);
+  });
+
+  it("拒绝 docker 安装模式", async () => {
+    await expect(
+      installSearxng({
+        root: tmp(),
+        platform: "linux",
+        pins,
+        options: { mode: "docker" },
+        logger: () => {},
+      }),
+    ).rejects.toThrow(/auto \| native \| external/);
   });
 });
 

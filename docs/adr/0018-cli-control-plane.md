@@ -92,7 +92,7 @@
 9. **非目标。**
 
    - 单组件启停 / 重启；
-   - Docker 模式的进程管理（`--searxng-mode` 默认改为 native）；
+   - Docker 部署与容器编排（`--searxng-mode` 只支持 `auto | native | external`，0.3.4 起移除 Docker）；
    - 远程多用户管理、Web 管理台；
    - 首版打成单二进制（Node SEA 留待后续评估）。
 

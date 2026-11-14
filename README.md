@@ -228,6 +228,8 @@ opencli weibo whoami -f json
 
 ## 一键安装（推荐）
 
+> **0.3.4 起不再支持 Docker 部署，请使用原生安装。**
+
 Linux / macOS：
 
 ```bash
@@ -246,7 +248,7 @@ irm https://raw.githubusercontent.com/djasdh/agent_search_gateway/master/scripts
 - 生成 `gateway.yaml` / `secrets.yaml`（随机 `gateway.token`）
 - 安装 Playwright chromium
 - 安装搜索依赖：
-  - Linux / macOS / Windows：默认用原生源码 + venv；Docker 仅在使用 `--searxng-mode docker` 时启用
+  - Linux / macOS / Windows：原生源码 + venv（`--searxng-mode` 可选 `auto | native | external`，默认 `auto` 即原生）
   - Windows：原生 searxng（自动打 `pwd` 补丁）+ 官方 FlareSolverr x64 二进制
 - 注册用户级自启（systemd --user / LaunchAgent / 登录计划任务）
 - 启动并做健康检查
@@ -285,56 +287,6 @@ npm run dev            # tsx 直接跑
 npm run build && npm start   # 编译后跑
 npm test               # vitest
 ```
-
-## Docker 部署（推荐）
-
-一条命令起全栈（gateway + searxng + flaresolverr）：
-
-```bash
-cd docker
-cp .env.example .env       # 填入 EXA / TAVILY / ZHIHU / EMBEDDING / GATEWAY 等密钥
-docker compose up -d        # 本地构建；或改用下方已推送的 ghcr 镜像
-docker compose ps
-```
-
-默认暴露 `127.0.0.1:3000/mcp`（仅本机）。公网部署：
-
-```bash
-GATEWAY_BIND=0.0.0.0 GATEWAY_TOKEN=<strong-token> docker compose up -d
-```
-
-镜像来源：
-
-| 镜像 | 来源 |
-|---|---|
-| `ghcr.io/<owner>/agent-search-gateway` | 本仓库 `Dockerfile`，由 `.github/workflows/docker.yml` 在 CI 构建推送（本地也可 `docker compose build`） |
-| `ghcr.io/<owner>/agent-search-searxng` | 本仓库 `docker/searxng/Dockerfile`（官方 searxng 基镜像 + `searxng-ext/` 引擎/插件） |
-| `ghcr.io/flaresolverr/flaresolverr` | 上游官方镜像 |
-| `mcr.microsoft.com/playwright:*` | 网关基镜像（自带 Node + Playwright 浏览器） |
-
-约定：
-
-- **密钥只经 `.env` → 环境变量注入，不进镜像**。searxng 的 `settings.yml` 由容器启动时从 `docker/searxng/settings.template.yml` 渲染。也可改用 `secrets.yaml`（取消 `docker/compose.yaml` 里的注释挂载，并 `chmod 600`）。
-- **配额台账共享**：`quota` 卷同时挂进 searxng 与 gateway（同一路径 `/quota/quota.json`）。
-- 语料库 + 广告过滤缓存在 `corpus` 卷（容器内 `/data`）。
-- **fetch 产物**（图片/PDF 等非文本文件）落在 `corpus` 卷的 `/data/downloads`（`docker/gateway.docker.yaml` 已指向该路径），容器重建不丢。
-- 容器内网关配置为只读挂载的 `docker/gateway.docker.yaml`；改搜索/重排策略改它即可。
-- **出口不经任何代理**：免费 API 引擎直连可达，内置通用爬虫已整体 disabled。
-- **知网学术检索**（`categories=science`）：检索匿名可用；**摘要与取件需要容器出口在机构网段**（会话票据 `LID`），否则只返回标题、取件报 `CNKI_NO_SESSION`。
-
-### 更新
-
-```bash
-cd docker
-git pull                 # 更新 compose 与 gateway.docker.yaml（配置不在镜像里）
-docker compose pull      # 拉取最新 ghcr 镜像（CI 在 master 推送后自动构建）
-docker compose up -d     # 重建容器；quota / corpus 卷保留
-```
-
-- 本地构建：`docker compose build && docker compose up -d`。
-- 只改 `docker/gateway.docker.yaml` 时不必重建镜像，`docker compose up -d` 即可（文件挂载进容器）。
-- searxng 的引擎清单来自镜像内的 `settings.template.yml`，改动需重新构建/拉取 searxng 镜像。
-- `corpus` 卷内含 `fetch` 产物（`/data/downloads`），容器重建不丢。
 
 ## 接入 MCP 客户端
 
@@ -414,7 +366,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `max_download_bytes` | 1073741824（1GB） | 非文本单文件上限；服务端给 `Content-Length` 时**下载前预检**，超出报 `[FETCH_TOO_LARGE]` |
-| `download_dir` | `data/downloads` | 落盘目录（Docker 内为 `/data/downloads`） |
+| `download_dir` | `data/downloads` | 落盘目录 |
 | `download_ttl_ms` | 604800000（7 天） | 产物保留时长 |
 | `download_max_total_bytes` | 4294967296（4GB） | 总量配额，超出按最旧优先清理 |
 | `files_route` | true | 是否提供 `GET /files/<id>` |
@@ -442,7 +394,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 
 | 源 | 承载方 | 覆盖 | 成本 |
 |---|---|---|---|
-| searxng 的 `tineye` | searxng 引擎（上游自带） | 任意图片的"网络出现处"（近似重复匹配） | 需在 searxng 的 `settings.yml` 里给 tineye 声明 `categories: [search_by_image]`（见 `searxng-ext/settings.example.yml` / `docker/searxng/settings.template.yml`）；网关不点名引擎 |
+| searxng 的 `tineye` | searxng 引擎（上游自带） | 任意图片的"网络出现处"（近似重复匹配） | 需在 searxng 的 `settings.yml` 里给 tineye 声明 `categories: [search_by_image]`（见 `searxng-ext/settings.example.yml` / `searxng-ext/settings.template.yml`）；网关不点名引擎 |
 | `tracemoe` | 网关侧附加源 | 动画截图 → 动画出处（AniList 标题/集数/时间点） | 免费、按 IP 100 次/日 |
 | `saucenao` | 网关侧附加源 | **插画 / 同人图出处**（Pixiv / Danbooru / Twitter…） | 免费 key（实测免费账号 100 次/天、4 次/30 秒）；**需在 `secrets.yaml` 填 `search.reverse_image.saucenao.api_key` 才启用** |
 | `baidu` | 网关侧附加源 | **中文 / 国内图**（完全相同图 + 相似图） | 免费（抓网页、无 key、有风控） |
@@ -486,13 +438,13 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 | 文件 | 管什么 | 谁读 | 改后生效 |
 |---|---|---|---|
 | `gateway.yaml` 的 `searxng`/`search` 块 | **怎么调 searxng**：连哪个地址（`searxng.url`）、超时、结果数、缓存 | gateway (node) | 重启 gateway |
-| searxng 的 `settings.yml`（安装版：`data/deps/searxng/settings.yml`；Docker：`docker/searxng/settings.template.yml`） | **searxng 内部引擎配置**：启哪些引擎、safesearch、UA | SearXNG 启动时 | 整栈重启 |
+| searxng 的 `settings.yml`（安装版：`data/deps/searxng/settings.yml`，模板：`searxng-ext/settings.template.yml`） | **searxng 内部引擎配置**：启哪些引擎、safesearch、UA | SearXNG 启动时 | 整栈重启 |
 
 要点：
 
-- `gateway.yaml` 的 `searxng.url` 必须指向 searxng 实际端口（源码运行 `127.0.0.1:8888`；Docker 内为服务名 `http://searxng:8080`），flaresolverr 同理（`8192`／`http://flaresolverr:8191`）
+- `gateway.yaml` 的 `searxng.url` 必须指向 searxng 实际端口（默认 `127.0.0.1:8888`），flaresolverr 同理（默认 `127.0.0.1:8192`）
 - settings.yml 是独立配置文件，**不要放 `/tmp`**（重启会丢）
-- Docker 下 `settings.yml` 由 `docker/searxng/entrypoint.sh` 用环境变量渲染，**不要手改容器内文件**
+- `settings.yml` 由一键安装器从 `searxng-ext/settings.template.yml` 渲染；手改后重装会被覆盖，改模板或改生成后的文件并重启
 - 引擎开关用 `asg engines enable/disable <name|group:name>`；searxng 引擎写 settings.yml，网关源写 gateway.yaml，然后整栈重启（会断开 MCP 连接）
 - 裸名冲突时用限定名区分：`searxng:baidu` / `gateway.reverse_image:baidu`；微博搜索用 `gateway.search:weibo`（依赖顶层 `weibo.enabled: true`）
 

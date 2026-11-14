@@ -504,7 +504,7 @@ scripts/update-adlist.sh                改为 asg adlist
 ## 9. 安装与升级
 
 - 安装器不调用 `asg`：CLI 在 `data/current` 就绪后才存在。
-- `--searxng-mode` 默认改为 **native**；Docker 分支保留代码但不再是默认值，也不作为测试目标。
+- `--searxng-mode` 只支持 `auto | native | external`（0.3.4 起移除 Docker 分支）。
 - 0.3.0 起 `asg` 是唯一管理入口，**要求重装**；不提供旧脚本兼容层。
 - `runtime/pins.json` 仍是依赖版本唯一来源；CLI 不自动追最新。
 - 自更新：切换 `data/current` → 整栈重启 → 健康检查 → 失败回滚到上一版本。
@@ -512,7 +512,7 @@ scripts/update-adlist.sh                改为 asg adlist
 ## 10. 非目标
 
 - 单组件启停 / 重启；
-- Docker 模式下的进程管理；
+- Docker 部署与容器编排（0.3.4 起不支持）；
 - 远程管理、多用户、Web 管理台；
 - `state.json` / `desired.json` / 控制 socket；
 - 环境变量指定安装根；
