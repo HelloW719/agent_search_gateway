@@ -64,11 +64,17 @@ afterAll(() => {
 });
 
 describe("systemd", () => {
-  it("is-active=active 时报告已注册且激活", () => {
+  it("is-active=active 且单元属于当前根时报告已注册且激活", () => {
+    const home = tempHome();
+    const root = tempHome();
+    const unit = systemdUnitPath(home);
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    fs.writeFileSync(unit, `[Service]\nWorkingDirectory=${root}\n`, "utf8");
+
     const { runner, calls } = makeRunner((_command, args) =>
       args[1] === "is-active" ? { stdout: "active\n" } : undefined,
     );
-    const result = systemd.detect(envWith(runner, tempHome()));
+    const result = systemd.detect(envWith(runner, home), root);
 
     expect(result).toMatchObject({ registered: true, active: true });
     expect(calls[0]).toEqual({
@@ -77,24 +83,49 @@ describe("systemd", () => {
     });
   });
 
-  it("inactive 但单元文件存在时视为已注册未激活", () => {
+  it("inactive 但单元属于当前根时视为已注册未激活", () => {
     const home = tempHome();
+    const root = tempHome();
     const unit = systemdUnitPath(home);
     fs.mkdirSync(path.dirname(unit), { recursive: true });
-    fs.writeFileSync(unit, "[Unit]\n", "utf8");
+    fs.writeFileSync(unit, `[Unit]\nWorkingDirectory=${root}\n`, "utf8");
 
     const { runner } = makeRunner((_command, args) =>
       args[1] === "is-active" ? { ok: false, status: 3, stdout: "inactive\n" } : fail(),
     );
-    const result = systemd.detect(envWith(runner, home));
+    const result = systemd.detect(envWith(runner, home), root);
 
     expect(result.registered).toBe(true);
     expect(result.active).toBe(false);
   });
 
+  it("单元属于其他安装根时不接管", () => {
+    const home = tempHome();
+    const unit = systemdUnitPath(home);
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    fs.writeFileSync(unit, "[Service]\nWorkingDirectory=/opt/other-asg\n", "utf8");
+
+    const { runner } = makeRunner((_command, args) =>
+      args[1] === "is-active" ? { stdout: "active\n" } : undefined,
+    );
+    const result = systemd.detect(envWith(runner, home), tempHome());
+
+    expect(result.registered).toBe(false);
+    expect(result.active).toBe(false);
+    expect(result.detail).toContain("/opt/other-asg");
+  });
+
+  it("没有 WorkingDirectory 时从 ExecStart 的 bin/asg.mjs 反推", () => {
+    expect(
+      systemd.unitRoot(
+        'ExecStart="/usr/bin/node" "/tmp/my asg/bin/asg.mjs" serve\n',
+      ),
+    ).toBe("/tmp/my asg");
+  });
+
   it("命令失败且没有单元文件时视为未注册（不抛异常）", () => {
     const { runner } = makeRunner(() => fail());
-    const result = systemd.detect(envWith(runner, tempHome()));
+    const result = systemd.detect(envWith(runner, tempHome()), tempHome());
     expect(result).toMatchObject({ registered: false, active: false });
   });
 
@@ -121,11 +152,12 @@ describe("systemd", () => {
 });
 
 describe("launchd", () => {
-  it("print 输出 state = running 时报告激活", () => {
+  it("print 输出 state = running 且 working directory 属于当前根时报告激活", () => {
+    const root = tempHome();
     const { runner, calls } = makeRunner(() => ({
-      stdout: "state = running\n\tpid = 321\n",
+      stdout: `state = running\n\tpid = 321\n\tworking directory = ${root}\n`,
     }));
-    const result = launchd.detect(envWith(runner, tempHome(), "darwin", "501"));
+    const result = launchd.detect(envWith(runner, tempHome(), "darwin", "501"), root);
 
     expect(result).toMatchObject({ registered: true, active: true });
     expect(calls[0]).toEqual({
@@ -136,15 +168,37 @@ describe("launchd", () => {
 
   it("plist 存在但未加载时视为已注册未激活", () => {
     const home = tempHome();
+    const root = tempHome();
     const plist = launchdPlistPath(home);
     fs.mkdirSync(path.dirname(plist), { recursive: true });
-    fs.writeFileSync(plist, "<plist/>", "utf8");
+    fs.writeFileSync(
+      plist,
+      `<plist><dict><key>WorkingDirectory</key><string>${root}</string></dict></plist>`,
+      "utf8",
+    );
 
     const { runner } = makeRunner(() => fail());
-    const result = launchd.detect(envWith(runner, home, "darwin", "501"));
+    const result = launchd.detect(envWith(runner, home, "darwin", "501"), root);
 
     expect(result.registered).toBe(true);
     expect(result.active).toBe(false);
+  });
+
+  it("plist 属于其他安装根时不接管", () => {
+    const home = tempHome();
+    const plist = launchdPlistPath(home);
+    fs.mkdirSync(path.dirname(plist), { recursive: true });
+    fs.writeFileSync(
+      plist,
+      "<plist><dict><key>WorkingDirectory</key><string>/opt/other-asg</string></dict></plist>",
+      "utf8",
+    );
+
+    const { runner } = makeRunner(() => fail());
+    const result = launchd.detect(envWith(runner, home, "darwin", "501"), tempHome());
+
+    expect(result.registered).toBe(false);
+    expect(result.detail).toContain("/opt/other-asg");
   });
 
   it("start / stop / restart 使用约定的 launchctl 参数", () => {
@@ -165,25 +219,42 @@ describe("launchd", () => {
 });
 
 describe("schtasks", () => {
-  it("计划任务存在且 Status=Running 时报告激活", () => {
-    const { runner, calls } = makeRunner((command, args) =>
-      args.includes("/fo")
-        ? { stdout: "TaskName: \\AgentSearchGateway\r\nStatus: Running\r\n" }
-        : undefined,
-    );
-    const result = schtasks.detect(envWith(runner, tempHome(), "win32"));
+  const taskOutput = (root: string): string =>
+    [
+      "TaskName: \\AgentSearchGateway",
+      "Status: Running",
+      `Task To Run:  "C:\\node.exe" "${root}\\bin\\asg.mjs" serve`,
+      "",
+    ].join("\r\n");
+
+  it("计划任务存在、Status=Running 且属于当前根时报告激活", () => {
+    const root = "C:\\asg-e2e";
+    const { runner, calls } = makeRunner(() => ({ stdout: taskOutput(root) }));
+    const result = schtasks.detect(envWith(runner, tempHome(), "win32"), root);
 
     expect(result.registered).toBe(true);
     expect(result.active).toBe(true);
     expect(calls[0]).toEqual({
       command: "schtasks",
-      args: ["/query", "/tn", WINDOWS_TASK_NAME],
+      args: ["/query", "/tn", WINDOWS_TASK_NAME, "/fo", "LIST", "/v"],
     });
+  });
+
+  it("计划任务属于其他安装根时不接管", () => {
+    const { runner } = makeRunner(() => ({ stdout: taskOutput("C:\\other-asg") }));
+    const result = schtasks.detect(
+      envWith(runner, tempHome(), "win32"),
+      "C:\\asg-e2e",
+    );
+
+    expect(result.registered).toBe(false);
+    expect(result.active).toBe(false);
+    expect(result.detail).toContain("C:\\other-asg");
   });
 
   it("查询失败视为未注册", () => {
     const { runner } = makeRunner(() => fail());
-    const result = schtasks.detect(envWith(runner, tempHome(), "win32"));
+    const result = schtasks.detect(envWith(runner, tempHome(), "win32"), "C:\\asg-e2e");
     expect(result).toMatchObject({ registered: false, active: false });
   });
 
@@ -237,9 +308,13 @@ describe("detectManager", () => {
     expect(detectManager(root, env)).toMatchObject({ mode: "pid", active: false });
   });
 
-  it("已注册 systemd 时报告 systemd 模式（检测不缓存）", () => {
+  it("已注册且属于当前根的 systemd 时报告 systemd 模式（检测不缓存）", () => {
     const root = pidRoot();
     const home = tempHome();
+    const unit = systemdUnitPath(home);
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    fs.writeFileSync(unit, `[Service]\nWorkingDirectory=${root}\n`, "utf8");
+
     let active = true;
     const { runner } = makeRunner((_command, args) =>
       args[1] === "is-active"
@@ -251,6 +326,21 @@ describe("detectManager", () => {
     expect(detectManager(root, env)).toMatchObject({ mode: "systemd", active: true });
     active = false;
     expect(detectManager(root, env)).toMatchObject({ mode: "systemd", active: false });
+  });
+
+  it("同名 systemd 单元属于其他安装根时回退 pid", () => {
+    const root = pidRoot();
+    const home = tempHome();
+    const unit = systemdUnitPath(home);
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    fs.writeFileSync(unit, "[Service]\nWorkingDirectory=/opt/other-asg\n", "utf8");
+
+    const { runner } = makeRunner((_command, args) =>
+      args[1] === "is-active" ? { stdout: "active\n" } : undefined,
+    );
+    const env = envWith(runner, home, "linux");
+
+    expect(detectManager(root, env)).toMatchObject({ mode: "pid", active: false });
   });
 
   it("不支持平台也回退 pid 模式", () => {

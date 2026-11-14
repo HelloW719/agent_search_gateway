@@ -76,6 +76,8 @@ node.exe <ROOT>\bin\asg.mjs serve
 
 ### 3.1 已注册服务管理器
 
+服务管理器**按安装根匹配**：只有 unit / plist / 计划任务的 `WorkingDirectory`（Windows 为任务命令里的 `bin/asg.mjs` 路径）指向当前 root 时，才使用服务管理器；同名服务属于其他安装根时回退到 pid 模式。安装器也不会覆盖其他安装根已注册的自启项。
+
 | 平台 | start | stop | restart |
 |---|---|---|---|
 | Linux | `systemctl --user start agent-search-gateway` | `systemctl --user stop …` | `systemctl --user restart …` |

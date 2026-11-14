@@ -200,6 +200,65 @@ function systemdUnitPath() {
   return path.join(homeDir(), '.config', 'systemd', 'user', SYSTEMD_UNIT_NAME);
 }
 
+function normalizeRoot(value) {
+  let resolved = path.resolve(String(value));
+  try {
+    resolved = fs.realpathSync.native(resolved);
+  } catch {
+    // 路径不存在时保留 resolve 结果。
+  }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function sameRoot(a, b) {
+  return normalizeRoot(a) === normalizeRoot(b);
+}
+
+/** 单元文件里的 WorkingDirectory；用于防止第二个安装根覆盖第一个的自启单元。 */
+function readUnitRoot(unitPath) {
+  try {
+    const text = fs.readFileSync(unitPath, 'utf8');
+    const match = /^WorkingDirectory=(.*)$/m.exec(text);
+    return match ? match[1].trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readPlistRoot(plistPath) {
+  try {
+    const text = fs.readFileSync(plistPath, 'utf8');
+    const match = /<key>WorkingDirectory<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(text);
+    return match
+      ? match[1]
+          .trim()
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&apos;/g, "'")
+          .replace(/&amp;/g, '&')
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function windowsTaskRoot(output) {
+  const line = /^(?:Task To Run|要运行的任务)\s*[:：]\s*(.*)$/im.exec(output)?.[1]?.trim();
+  if (!line) return undefined;
+  const tokens = line.match(/"[^"]*"|\S+/g) || [];
+  for (const token of tokens) {
+    const value = token.replace(/^"|"$/g, '');
+    if (path.win32.basename(value).toLowerCase() !== 'asg.mjs') continue;
+    const binDir = path.win32.dirname(value);
+    if (path.win32.basename(binDir).toLowerCase() !== 'bin') continue;
+    return path.win32.dirname(binDir);
+  }
+  const fallback = /([A-Za-z]:\\[^"\r\n]*?\\bin\\asg\.mjs)/i.exec(line)?.[1];
+  if (!fallback) return undefined;
+  return path.win32.dirname(path.win32.dirname(fallback));
+}
+
 function checkSystemdUser(log) {
   const result = execute('systemctl', ['--user', 'show-environment'], {
     allowFailure: true,
@@ -231,6 +290,24 @@ async function installLinux({ root, nodePath, log, dryRun }) {
   const launcherPath = launcherPathFor(root);
   const unitPath = systemdUnitPath();
   ensureDir(path.dirname(unitPath));
+
+  const existingRoot = readUnitRoot(unitPath);
+  if (existingRoot && !sameRoot(existingRoot, root)) {
+    log.warn(`已存在指向其他安装根的 systemd 单元：${unitPath}`);
+    log.warn(`  现有安装根：${existingRoot}`);
+    log.warn(`  本次安装根：${root}`);
+    log.warn('已跳过自启注册；本次安装可继续用 asg start（pid supervisor）启动。');
+    return {
+      platform: 'linux',
+      method: 'systemd-user',
+      path: unitPath,
+      unitPath,
+      registered: false,
+      skipped: 'other-root',
+      existingRoot,
+      dryRun,
+    };
+  }
 
   fs.writeFileSync(unitPath, renderSystemdUnit({ root, nodePath, launcherPath }), {
     encoding: 'utf8',
@@ -268,8 +345,22 @@ async function installLinux({ root, nodePath, log, dryRun }) {
   };
 }
 
-async function uninstallLinux({ log, dryRun }) {
+async function uninstallLinux({ root, log, dryRun }) {
   const unitPath = systemdUnitPath();
+  const existingRoot = readUnitRoot(unitPath);
+  if (root && existingRoot && !sameRoot(existingRoot, root)) {
+    log.warn(`跳过卸载：systemd 单元属于其他安装根（${existingRoot}）`);
+    return {
+      platform: 'linux',
+      method: 'systemd-user',
+      path: unitPath,
+      unitPath,
+      removed: false,
+      skipped: 'other-root',
+      existingRoot,
+      dryRun,
+    };
+  }
   const availability = dryRun ? { ok: true } : checkSystemdUser(log);
 
   if (availability.ok) {
@@ -442,6 +533,24 @@ async function installMacos({ root, nodePath, log, dryRun }) {
   ensureDir(path.dirname(plistPath));
   ensureDir(logs.logDir);
 
+  const existingRoot = readPlistRoot(plistPath);
+  if (existingRoot && !sameRoot(existingRoot, root)) {
+    log.warn(`已存在指向其他安装根的 LaunchAgent：${plistPath}`);
+    log.warn(`  现有安装根：${existingRoot}`);
+    log.warn(`  本次安装根：${root}`);
+    log.warn('已跳过自启注册；本次安装可继续用 asg start（pid supervisor）启动。');
+    return {
+      platform: 'darwin',
+      method: 'launchd',
+      path: plistPath,
+      plistPath,
+      registered: false,
+      skipped: 'other-root',
+      existingRoot,
+      dryRun,
+    };
+  }
+
   fs.writeFileSync(plistPath, renderMacosPlist({ root, nodePath, launcherPath }), {
     encoding: 'utf8',
     mode: 0o644,
@@ -498,9 +607,24 @@ async function installMacos({ root, nodePath, log, dryRun }) {
   };
 }
 
-async function uninstallMacos({ log, dryRun }) {
+async function uninstallMacos({ root, log, dryRun }) {
   const plistPath = macosPlistPath();
   const domain = `gui/${currentUid()}`;
+
+  const existingRoot = readPlistRoot(plistPath);
+  if (root && existingRoot && !sameRoot(existingRoot, root)) {
+    log.warn(`跳过卸载：LaunchAgent 属于其他安装根（${existingRoot}）`);
+    return {
+      platform: 'darwin',
+      method: 'launchd',
+      path: plistPath,
+      plistPath,
+      removed: false,
+      skipped: 'other-root',
+      existingRoot,
+      dryRun,
+    };
+  }
 
   const bootout = execute('launchctl', ['bootout', domain, plistPath], {
     dryRun,
@@ -614,6 +738,31 @@ async function installWindows({ root, nodePath, log, dryRun }) {
   const launcherPath = launcherPathFor(root);
   const taskCommand = windowsTaskCommand(nodePath, launcherPath);
 
+  const existing = execute(
+    'schtasks',
+    ['/query', '/tn', WINDOWS_TASK_NAME, '/fo', 'LIST', '/v'],
+    { allowFailure: true, dryRun: false, logger: log },
+  );
+  const existingRoot =
+    existing && existing.status === 0 ? windowsTaskRoot(existing.stdout || '') : undefined;
+  if (existingRoot && !sameRoot(existingRoot, root)) {
+    log.warn(`已存在指向其他安装根的计划任务：${WINDOWS_TASK_NAME}`);
+    log.warn(`  现有安装根：${existingRoot}`);
+    log.warn(`  本次安装根：${root}`);
+    log.warn('已跳过自启注册；本次安装可继续用 asg start（pid supervisor）启动。');
+    return {
+      platform: 'win32',
+      method: 'schtasks',
+      path: launcherPath,
+      launcherPath,
+      taskName: WINDOWS_TASK_NAME,
+      registered: false,
+      skipped: 'other-root',
+      existingRoot,
+      dryRun,
+    };
+  }
+
   const args = [
     '/create',
     '/tn',
@@ -649,7 +798,29 @@ async function installWindows({ root, nodePath, log, dryRun }) {
   };
 }
 
-async function uninstallWindows({ log, dryRun }) {
+async function uninstallWindows({ root, log, dryRun }) {
+  if (!dryRun) {
+    const existing = execute(
+      'schtasks',
+      ['/query', '/tn', WINDOWS_TASK_NAME, '/fo', 'LIST', '/v'],
+      { allowFailure: true, logger: log },
+    );
+    const existingRoot =
+      existing && existing.status === 0 ? windowsTaskRoot(existing.stdout || '') : undefined;
+    if (root && existingRoot && !sameRoot(existingRoot, root)) {
+      log.warn(`跳过卸载：计划任务属于其他安装根（${existingRoot}）`);
+      return {
+        platform: 'win32',
+        method: 'schtasks',
+        taskName: WINDOWS_TASK_NAME,
+        removed: false,
+        skipped: 'other-root',
+        existingRoot,
+        dryRun,
+      };
+    }
+  }
+
   if (dryRun) {
     log.info(`[dry-run] schtasks /delete /tn ${WINDOWS_TASK_NAME} /f`);
     return {
@@ -760,13 +931,13 @@ export async function installService({
   return installWindows({ root: resolvedRoot, nodePath: resolvedNode, log, dryRun });
 }
 
-export async function uninstallService({ platform, logger, dryRun = false } = {}) {
+export async function uninstallService({ root, platform, logger, dryRun = false } = {}) {
   const log = createLogger(logger);
   const target = normalizePlatform(platform);
 
-  if (target === 'linux') return uninstallLinux({ log, dryRun });
-  if (target === 'darwin') return uninstallMacos({ log, dryRun });
-  return uninstallWindows({ log, dryRun });
+  if (target === 'linux') return uninstallLinux({ root, log, dryRun });
+  if (target === 'darwin') return uninstallMacos({ root, log, dryRun });
+  return uninstallWindows({ root, log, dryRun });
 }
 
 export async function serviceStatus({ platform, logger, dryRun = false } = {}) {

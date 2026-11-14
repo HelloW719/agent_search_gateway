@@ -86,7 +86,7 @@ export function detectManager(root: string, env: PlatformEnv = createPlatformEnv
   const platform = normalizePlatform(env.platform);
 
   if (platform === "linux") {
-    const result = systemd.detect(env);
+    const result = systemd.detect(env, root);
     if (result.registered) {
       return { mode: "systemd", ...result };
     }
@@ -94,7 +94,7 @@ export function detectManager(root: string, env: PlatformEnv = createPlatformEnv
   }
 
   if (platform === "darwin") {
-    const result = launchd.detect(env);
+    const result = launchd.detect(env, root);
     if (result.registered) {
       return { mode: "launchd", ...result };
     }
@@ -102,7 +102,7 @@ export function detectManager(root: string, env: PlatformEnv = createPlatformEnv
   }
 
   if (platform === "win32") {
-    const result = schtasks.detect(env);
+    const result = schtasks.detect(env, root);
     if (result.registered) {
       return { mode: "schtasks", ...result };
     }

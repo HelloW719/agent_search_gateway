@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import { CliError, EXIT } from "../errors.js";
 import type { CommandResult, PlatformEnv } from "./index.js";
-import { LAUNCHD_LABEL, launchdDomain, launchdPlistPath } from "./paths.js";
+import { LAUNCHD_LABEL, launchdDomain, launchdPlistPath, samePath } from "./paths.js";
 
 export interface DetectResult {
   registered: boolean;
@@ -29,7 +29,28 @@ function assertOk(result: CommandResult, action: string): void {
   }
 }
 
-export function detect(env: PlatformEnv): DetectResult {
+function xmlUnescape(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/** 从 LaunchAgent plist 的 WorkingDirectory 解析安装根。 */
+export function plistRoot(text: string): string | undefined {
+  const match = /<key>WorkingDirectory<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(text);
+  return match ? xmlUnescape(match[1]!.trim()) : undefined;
+}
+
+/** 从 `launchctl print` 输出解析 working directory。 */
+export function printRoot(text: string): string | undefined {
+  return /working directory = ([^\n]+)/.exec(text)?.[1]?.trim();
+}
+
+/** 只认属于当前安装根的 LaunchAgent。 */
+export function detect(env: PlatformEnv, root: string): DetectResult {
   const printed = env.runner("launchctl", ["print", target(env)], { timeoutMs: 5000 });
   const loaded = printed.ok;
   let active = false;
@@ -42,9 +63,27 @@ export function detect(env: PlatformEnv): DetectResult {
     active = state === "running" || hasPid;
   }
 
-  const registered = loaded || fs.existsSync(launchdPlistPath(env.home));
+  let plist = "";
+  try {
+    plist = fs.readFileSync(launchdPlistPath(env.home), "utf8");
+  } catch {
+    // 未安装时没有 plist。
+  }
+
+  const ownerRoot = plistRoot(plist) ?? (loaded ? printRoot(printed.stdout) : undefined);
+  if (!ownerRoot) {
+    return { registered: false, active: false, detail: state ?? "未注册或无法识别安装根" };
+  }
+  if (!samePath(ownerRoot, root, "darwin")) {
+    return {
+      registered: false,
+      active: false,
+      detail: `服务属于其他安装根：${ownerRoot}`,
+    };
+  }
+
   return {
-    registered,
+    registered: true,
     active,
     detail: state ?? (loaded ? "已加载" : "未加载"),
   };
