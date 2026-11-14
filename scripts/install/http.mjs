@@ -47,102 +47,127 @@ function run(command, args, options = {}) {
   });
 }
 
-async function downloadWithCurl(url, dest, token, logger) {
-  const headers = ['-H', 'User-Agent: agent-search-gateway-installer'];
-  if (token && new URL(url).hostname === 'api.github.com') {
-    headers.push('-H', `Authorization: Bearer ${token}`);
+/** 合并默认 UA、调用方自定义头与 GitHub token；Authorization 只发给 GitHub API。 */
+export function buildHeaders(url, token, extra = {}) {
+  const headers = { 'User-Agent': 'agent-search-gateway-installer', ...extra };
+  const isApi = new URL(url).hostname === 'api.github.com';
+  // Release 资产通常是 github.com / objects.githubusercontent.com 的地址，
+  // 不能把 API token 跟着浏览器下载地址发过去。
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'authorization' && !isApi) delete headers[key];
   }
+  const hasAuthorization = Object.keys(headers).some((key) => key.toLowerCase() === 'authorization');
+  if (token && isApi && !hasAuthorization) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+function curlHeaderArgs(headers) {
+  return Object.entries(headers).flatMap(([key, value]) => ['-H', `${key}: ${value}`]);
+}
+
+async function downloadWithCurl(url, dest, headers, logger) {
   const result = await run('curl', [
     '-fsSL',
     '--retry', '2',
     '--connect-timeout', '20',
     '--max-time', '600',
     '--proto', '=https',
-    ...headers,
+    ...curlHeaderArgs(headers),
     '-o', dest,
     url,
   ]);
   if (result.code === 0) {
     logger?.(`已通过 curl 下载: ${path.basename(dest)}`);
-    return true;
+    return null;
   }
-  return false;
+  return `curl: ${result.stderr.trim() || `退出码 ${result.code}`}`;
 }
 
-async function downloadWithWget(url, dest, logger) {
-  const result = await run('wget', ['-nv', '--https-only', '--max-redirect=5', '-O', dest, url]);
+async function downloadWithWget(url, dest, headers, logger) {
+  const headerArgs = Object.entries(headers).map(([key, value]) => `--header=${key}: ${value}`);
+  const result = await run('wget', [
+    '-nv',
+    '--https-only',
+    '--max-redirect=5',
+    ...headerArgs,
+    '-O', dest,
+    url,
+  ]);
   if (result.code === 0) {
     logger?.(`已通过 wget 下载: ${path.basename(dest)}`);
-    return true;
+    return null;
   }
-  return false;
+  return `wget: ${result.stderr.trim() || `退出码 ${result.code}`}`;
 }
 
-async function downloadWithFetch(url, dest, token, logger) {
+async function downloadWithFetch(url, dest, headers, logger) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 600_000);
   try {
-    const headers = { 'user-agent': 'agent-search-gateway-installer' };
-    if (token && new URL(url).hostname === 'api.github.com') {
-      headers.authorization = `Bearer ${token}`;
-    }
     const res = await fetch(url, { headers, redirect: 'follow', signal: controller.signal });
-    if (!res.ok || !res.body) return false;
+    if (!res.ok) return `HTTP ${res.status}`;
+    if (!res.body) return '响应没有内容';
     assertHttps(res.url || url);
     await pipeline(Readable.fromWeb(res.body), createWriteStream(dest));
     logger?.(`已通过 fetch 下载: ${path.basename(dest)}`);
-    return true;
-  } catch {
-    return false;
+    return null;
+  } catch (error) {
+    return `fetch: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** 下载文件到 dest；失败抛错并清理临时文件。 */
-export async function download(url, dest, { token = '', logger } = {}) {
+/** 下载文件到 dest；失败抛错并清理临时文件。headers 用于 GitHub API 等需要自定义请求头的场景。 */
+export async function download(url, dest, { token = '', logger, headers = {} } = {}) {
   assertHttps(url);
   await fs.mkdir(path.dirname(dest), { recursive: true });
   const tmp = `${dest}.part-${process.pid}-${Date.now()}`;
+  const requestHeaders = buildHeaders(url, token, headers);
   const proxy = proxyEnvName();
   const attempts = proxy
     ? [downloadWithCurl, downloadWithWget, downloadWithFetch]
     : [downloadWithFetch, downloadWithCurl, downloadWithWget];
 
+  let reason = '';
   try {
     for (const attempt of attempts) {
       try {
-        if (await attempt(url, tmp, token, logger)) {
+        const failure = await attempt(url, tmp, requestHeaders, logger);
+        if (!failure) {
           const stat = await fs.stat(tmp);
           if (stat.size === 0) throw new Error('下载内容为空');
           await fs.rename(tmp, dest);
           return dest;
         }
-      } catch {
-        /* 换下一种方式 */
+        reason = failure;
+      } catch (error) {
+        reason = error instanceof Error ? error.message : String(error);
       }
     }
     const hint = proxy
       ? `已检测到代理变量 ${proxy}，请检查代理是否可用。`
       : '若在代理环境，请设置 HTTPS_PROXY（或 https_proxy）后重试，例如 HTTPS_PROXY=http://127.0.0.1:7897。';
-    throw new Error(`下载失败: ${url}\n${hint}`);
+    throw new Error(`下载失败: ${url}\n${reason ? `原因: ${reason}\n` : ''}${hint}`);
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => {});
   }
 }
 
-export async function fetchText(url, { token = '', logger } = {}) {
+export async function fetchText(url, { token = '', logger, headers = {} } = {}) {
   const tmp = path.join(process.cwd(), `.asg-fetch-${process.pid}-${Date.now()}`);
   try {
-    await download(url, tmp, { token, logger });
+    await download(url, tmp, { token, logger, headers });
     return await fs.readFile(tmp, 'utf8');
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => {});
   }
 }
 
-export async function fetchJson(url, { token = '', logger } = {}) {
-  return JSON.parse(await fetchText(url, { token, logger }));
+export async function fetchJson(url, options = {}) {
+  return JSON.parse(await fetchText(url, options));
 }
 
 export async function sha256File(file) {

@@ -3,7 +3,7 @@ import { prepareConfig } from "../../scripts/install/config.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import { parseArgs, platformTag } from "../../scripts/install/cli.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
-import { proxyEnvName, sha256File, verifySha256 } from "../../scripts/install/http.mjs";
+import { buildHeaders, proxyEnvName, sha256File, verifySha256 } from "../../scripts/install/http.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import {
   disableBundledReadline,
@@ -139,6 +139,17 @@ describe("下载校验", () => {
         else process.env[k] = backup[k];
       }
     }
+  });
+
+  it("GitHub token 只发给 api.github.com，不跟随资产地址", () => {
+    const api = buildHeaders("https://api.github.com/repos/a/b/releases", "tkn");
+    expect(api.Authorization).toBe("Bearer tkn");
+    expect(api.Accept).toBeUndefined();
+
+    const asset = buildHeaders("https://github.com/a/b/releases/download/v1/x.mjs", "tkn", {
+      Authorization: "Bearer tkn",
+    });
+    expect(asset.Authorization).toBeUndefined();
   });
 });
 

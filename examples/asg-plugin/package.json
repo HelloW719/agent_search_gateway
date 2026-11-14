@@ -1,0 +1,14 @@
+{
+  "name": "asg-plugin-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "最小 asg 第三方插件模板（单文件 ESM）",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "test": "npm run build && node --test test/plugin.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

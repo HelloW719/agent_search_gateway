@@ -1,0 +1,9 @@
+{
+  "id": "example-fetch",
+  "name": "Example Fetch Plugin",
+  "version": "0.1.0",
+  "api_version": 1,
+  "provides": ["fetch"],
+  "entry": "index.mjs",
+  "description": "示例 asg 插件：接管 example.com 的抓取"
+}

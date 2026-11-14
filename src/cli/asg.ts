@@ -18,6 +18,7 @@ const USAGE = `用法: asg <命令> [选项]
   config get|set|validate      gateway.yaml / secrets.yaml
   engines list|enable|disable  搜索引擎（searxng + 网关原生源）
   plugins list|install|remove  外部后端
+  extensions search|install|list|remove  第三方插件
   browser status|install       Playwright 浏览器
   adlist update               广告过滤列表
   update check|apply          自更新
@@ -43,6 +44,7 @@ const COMMANDS: Record<string, Loader> = {
   config: () => import("./commands/config.js").then((m) => m.run),
   engines: () => import("./commands/engines.js").then((m) => m.run),
   plugins: () => import("./commands/plugins.js").then((m) => m.run),
+  extensions: () => import("./commands/extensions.js").then((m) => m.run),
   browser: () => import("./commands/browser.js").then((m) => m.run),
   adlist: () => import("./commands/adlist.js").then((m) => m.run),
   update: () => import("./commands/update.js").then((m) => m.run),
@@ -86,7 +88,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const root = resolveRoot(globals.root);
   // 带子命令的顶层命令在输出里带上子命令（config.set / engines.list ...）。
-  const SUBCOMMANDS = new Set(["config", "engines", "plugins", "browser", "adlist", "update"]);
+  const SUBCOMMANDS = new Set([
+    "config",
+    "engines",
+    "plugins",
+    "extensions",
+    "browser",
+    "adlist",
+    "update",
+  ]);
   const subcommand = SUBCOMMANDS.has(command) ? rest[0] : undefined;
   const resultName = subcommand ? `${command}.${subcommand}` : command;
 

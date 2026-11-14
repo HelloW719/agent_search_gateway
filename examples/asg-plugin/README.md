@@ -1,0 +1,62 @@
+# asg 第三方插件模板
+
+这是一个最小可发布的 asg 插件模板：TypeScript 源码经 esbuild 打成**单文件 ESM**，
+Release 只包含 `index.mjs`、`asg-plugin.json` 与 `SHA256SUMS`。
+
+## 目录
+
+```text
+.
+├── asg-plugin.json           # 插件 manifest
+├── esbuild.config.mjs        # 单文件打包配置
+├── src/index.ts              # 插件实现（导出 fetch / engine）
+├── test/plugin.mjs            # 构建后的冒烟测试
+└── .github/workflows/release.yml
+```
+
+## 开发
+
+```bash
+npm install
+npm run build     # 生成 index.mjs
+npm test          # 先构建，再用 node --test 跑冒烟测试
+```
+
+`src/index.ts` 目前导出 `fetch` 对象；如果 `provides` 包含 `search`，
+还需要从同一文件导出 `engine`。不要 import 网关内部模块，也不要依赖
+宿主 `node_modules` 里的第三方包（Node 内置模块可以）。
+
+## manifest
+
+`asg-plugin.json` 的关键字段：
+
+- `id`：安装目录名，3–64 位小写字母/数字/`.` `_` `-`；
+- `version`：必须与 Release tag 去掉 `v` 后一致；
+- `api_version`：当前固定为 `1`；
+- `provides`：`["search"]`、`["fetch"]` 或两者；
+- `entry`：单个 `.mjs` / `.js` 文件名，不能带路径。
+
+## 发布
+
+1. 修改 `asg-plugin.json` 与 `package.json` 里的版本号（例如 `0.1.0`）。
+2. 提交并打 tag：`git tag v0.1.0 && git push origin v0.1.0`。
+3. GitHub Actions 会执行 `npm ci`、`npm run build`，生成
+   `sha256sum index.mjs asg-plugin.json > SHA256SUMS`，并创建 Release。
+
+发布后用户即可安装：
+
+```bash
+asg extensions install <owner>/<repo>@0.1.0
+asg extensions list
+```
+
+## 发现
+
+请给仓库加上 GitHub topic：**`asg-plugin`**。这样用户可以通过
+`asg extensions search` 找到它。
+
+## 当前限制
+
+当前 asg 只完成插件安装，**不会加载插件代码**，安装后也不会重启网关。
+运行时加载、权限与沙箱会在后续版本接入；在此之前请把本模板当作发布格式与
+命名导出的参考。
