@@ -26,7 +26,7 @@ interface EngineProvider {
   kind: EngineKind;
   displayName: string;     // 面向用户/错误文案
   routing(ctx): string[];
-  requires?: string[];     // secrets.… / config:…
+  requires?: string[];     // secrets.… / secret:<name> / config:…
   available(ctx): boolean; // 前置条件（密钥 / 上游能力开关）
   enabled?(ctx): boolean;  // 引擎自身的启用状态
   enabledPath?: string[];  // gateway.search 写回 gateway.yaml 的布尔路径
@@ -41,6 +41,7 @@ interface EngineProvider {
 {
   config: Record<string, unknown>;   // 与 gateway.yaml 同形的切片
   secrets: Record<string, unknown>;  // 与 secrets.yaml 同形的切片
+  pluginSecrets?: Record<string, string>; // 第三方 search 插件密钥（已解析）
   logger?: Logger;
 }
 ```
@@ -48,6 +49,15 @@ interface EngineProvider {
 - CLI 传原始 `configPlain`（整份 gateway.yaml）与 secrets。
 - 运行期传 `{ search, weibo }` 与 `{ search: { reverse_image: { saucenao: { api_key } } } }`。
 - provider 内部一律用 `asObject` / `dig` 读取，不依赖完整 schema 类型，因此两种调用方可以共用。
+- 第三方 search 插件额外获得 `ctx.pluginSecrets`：来源是 `secrets.yaml` 的
+  `extensions.<engineId>.<name>`，`env:NAME` 已解析，空值不注入。
+
+`requires` 支持三种依赖：
+
+- `secrets.a.b`：内置密钥，读 `secrets.yaml` 的 `a.b`；
+- `secret:<name>`：扩展密钥，读 `secrets.yaml` 的 `extensions.<engineId>.<name>`；
+  值为空（含解析后的 `env:` 为空）时 `available()` 强制返回 false；
+- `config:a.b`：配置依赖，读 `gateway.yaml`。
 
 运行期分两种：
 
@@ -73,6 +83,28 @@ interface EngineProvider {
 
 文本源（`gateway.search`）同理：新建 provider、在 registry 注册，并声明 `enabled(ctx)` 与 `enabledPath`（如 weibo 的 `["search","weibo","enabled"]`）。CLI 的 `GatewayStore` 会按 `enabledPath` 自动读写，运行期按 `providersForGroup("gateway.search")` 依次询问 `enabled()` / `plan()`，不需要再改 store 或 `service.ts`。新文本源如果带独立配置段，仍需在 `settings/schema.ts` 增加对应 schema；复用现有配置段则不必。
 
+### 3.1 第三方扩展的路由与密钥覆盖
+
+`src/extensions/loader.ts` 在加载 `provides: ["search"]` 的扩展时，会按 provider.id 读取：
+
+```yaml
+extensions:
+  "gateway.search:weibo":
+    routing:
+      category: news
+      hot_category: news_hot
+```
+
+有 `routing.category` / `routing.hot_category` 时，loader 包装 provider：
+
+- `routing()` 返回已设置的 `category:<值>`（不再调用插件自身的 `routing()`）；
+- `runtime.kind === "search"` 时由宿主生成的 `plan()` 覆盖插件 plan，优先级为
+  **hot 命中 → `{ hot: true }`，普通类别命中 → `{ hot: false }`，都不中 → `undefined`**；
+- 类别匹配大小写不敏感、按逗号分隔，与插件 SDK 的 `hasCategory` 一致。
+
+`--clear` 会删除 `extensions.<engineId>.routing`，插件恢复自己的默认 `routing()` 与 `plan()`。
+没有配置覆盖的插件不会被包装，行为与插件自身实现完全一致。
+
 ## 4. CLI 与运行期如何消费
 
 ### CLI
@@ -80,7 +112,7 @@ interface EngineProvider {
 `src/cli/engines/stores/gateway.ts`：
 
 - 遍历 `providersForGroup("gateway.reverse_image")` 生成记录：`id/name/kind` 直接取 provider，`enabled` 由 `search.reverse_image.sources` 决定，`available/routing/requires` 调 provider；
-- 遍历 `providersForGroup("gateway.search")` 生成记录，`enabled` / `available` / `routing` / `requires` 全部来自 provider；
+- 遍历 `providersForGroup("gateway.search")` 生成记录，`enabled` / `available` / `routing` / `requires` 全部来自 provider（含 loader 施加的 `extensions` 覆盖）；
 - **写入仍由 store 负责**：reverse_image 增删 `sources` 数组；文本源按 provider 的 `enabledPath` 写布尔值。provider 不碰 YAML。
 
 ### 运行期
@@ -96,9 +128,9 @@ interface EngineProvider {
 
 - `registry.ts` 直接 import 内置 provider，构建时全部打包；
 - id 重复属于编程错误，模块加载即 throw；
-- 没有动态发现、没有外部插件加载。
+- 内置 provider 没有动态发现；第三方扩展通过 `data/extensions` 加载 search 引擎（见 `docs/extensions.md`），再以 overlay 形式合并进注册表。
 
-后续若支持外部 provider，需要另行定义 manifest / 加载目录 / 沙箱边界；在此之前，新增引擎必须改源码并重新发版。
+`extensions.<engineId>.routing` 只覆盖路由/类别判断，不改变 provider 的启用状态；启用/禁用仍由 `asg engines enable/disable` 写 `settings.yml` 或 `gateway.yaml`。
 
 当前已知边界：
 

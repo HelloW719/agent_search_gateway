@@ -9,7 +9,7 @@
 
 `asg` 只做三件事：**探测三个服务、整栈启停、写配置文件后整栈重启**。
 
-不持有运行时状态，不做单组件重启，不支持 Docker，不读环境变量。
+不持有运行时状态，不做单组件重启，不支持 Docker；安装根不读环境变量（`env:` 密钥引用由运行期解析）。
 
 安装本身仍由 `scripts/install.sh` / `scripts/install.ps1` 负责；CLI 在安装完成后才存在。
 
@@ -198,6 +198,9 @@ gateway 不可访问 → 直接探 searxng /healthz 与 flaresolverr /
 |---|---|
 | 端口、searxng URL、FlareSolverr 开关、浏览器开关 | `gateway.yaml` |
 | 搜索引擎启用/禁用 | `data/deps/searxng/settings.yml` |
+| 引擎路由策略（resident / rotating） | `gateway.yaml` |
+| 扩展引擎路由覆盖 | `gateway.yaml` → `extensions.<engineId>.routing` |
+| 扩展引擎密钥 | `secrets.yaml` → `extensions.<engineId>.<name>` |
 | 插件命令 | `gateway.yaml` |
 | 广告过滤 level | `gateway.yaml` |
 
@@ -260,13 +263,20 @@ asg engines list
 asg engines list --all
 asg engines enable <name|group:name...>
 asg engines disable <name|group:name...>
+
+asg engines route <engine> resident|rotating|none
+asg engines route <engine> --category <name> [--hot-category <name>]
+asg engines route <engine> --clear
+
+asg engines secret <engine> [--name <name>] --stdin
+asg engines secret <engine> [--name <name>] --clear
 ```
 
 | group | kind | 存储 |
 |---|---|---|
 | `searxng` | `searxng` | `data/deps/searxng/settings.yml` → `engines[].disabled` |
 | `gateway.reverse_image` | `gateway` | `gateway.yaml` → `search.reverse_image.sources` |
-| `gateway.search` | `gateway` | `gateway.yaml` → `search.weibo.enabled` |
+| `gateway.search` | `gateway` | `gateway.yaml` → `search.<engine>.enabled` / `extensions.<engineId>.routing` |
 
 第一版网关原生以图搜图源固定为 `tracemoe`、`saucenao`、`baidu`；文本源为 `weibo`。
 
@@ -275,7 +285,18 @@ asg engines disable <name|group:name...>
 - `enable/disable` 支持限定名 `searxng:google`、`gateway.reverse_image:baidu`、`gateway.search:weibo`；裸名（如 `google`）只在唯一命中时生效，命中多个 group 时报 `ENGINE_AMBIGUOUS`（退出码 4，`details.engines` 给出候选 id）；
 - `enable/disable` 时本地不存在、但属于 searxng 默认引擎的名字，在线时通过 `/config` 校验后追加最小覆盖项；searxng 不在线则按 `ENGINE_NOT_FOUND` 处理；
 - `gateway.*` 组不做远端兜底：本地没有就是 `ENGINE_NOT_FOUND`；
-- `resident` / `rotating` 只在输出里显示，第一版不提供编辑；
+- `route` / `secret` 一次只接受一个引擎，同样支持 `group:name` 与唯一裸名；
+- `route` 按 group 分流：
+  - `searxng`：只接受位置参数 `resident` / `rotating` / `none`，写 `gateway.yaml` 的 `search.engines.resident` / `search.engines.rotating`（两个列表互斥）；
+  - `gateway.search`：只接受 `--category` / `--hot-category` / `--clear`，写 `extensions.<engineId>.routing.category` / `.hot_category`；`--clear` 删除 `routing`，回退插件默认；
+  - `gateway.reverse_image`：不支持路由，报 `ENGINE_NO_ROUTING`（退出码 4），用 `enable` / `disable` 控制 `search.reverse_image.sources`；
+- `secret` 从引擎 `requires` 推导密钥路径：
+  - `secrets.a.b` → 内置密钥，写 `secrets.yaml` 的 `a.b`；
+  - `secret:<name>` → 扩展密钥，写 `secrets.yaml` 的 `extensions.<engineId>.<name>`；
+  - 只有一个可写依赖时可省略 `--name`；多个依赖必须给 `--name`，否则 `ENGINE_SECRET_AMBIGUOUS`（退出码 4）；`--name` 接受完整路径、完整 `secret:name` 或末段短名；
+  - 值只从 stdin 读（`--stdin`），不接受位置参数；末尾一个换行会被去掉，空值报错；
+  - `--clear` 删除对应路径；引擎没有密钥依赖且未给 `--name` 报 `ENGINE_NO_SECRET`，未知 `--name` 报 `MISSING_SECRET`（均为退出码 4）；
+- `route` / `secret` 只写一个文件，成功后整栈重启一次；人类输出会提示 MCP 连接会断开；
 - 缺 secret 的引擎 `enable` 直接拒绝：`MISSING_SECRET`，退出码 4；
 - 微博启用依赖顶层 `weibo.enabled`（运行能力开关）：为 `false`/缺失时 `enable gateway.search:weibo` 报 `MISSING_DEPENDENCY`，退出码 4；引擎命令只写 `search.weibo.enabled`，不改顶层开关；
 - 批量启用/禁用全有或全无：先全部校验，任一不可用则一个文件都不写；
@@ -308,6 +329,46 @@ asg engines disable <name|group:name...>
   "available": false,
   "routing": ["category:weibo", "category:weibo_hot"],
   "requires": ["config:weibo.enabled"]
+}
+```
+
+`extensions` 段按完整 engineId 保存用户覆盖，例如：
+
+```yaml
+extensions:
+  "gateway.search:weibo":
+    routing:
+      category: news
+      hot_category: news_hot
+```
+
+```yaml
+# secrets.yaml
+extensions:
+  "gateway.search:weibo":
+    cookie: env:WEIBO_COOKIE
+```
+
+```json
+{
+  "engine": "gateway.search:weibo",
+  "routing": ["category:news", "category:news_hot"],
+  "changed": [
+    "extensions.gateway.search:weibo.routing.category",
+    "extensions.gateway.search:weibo.routing.hot_category"
+  ],
+  "restart": "all",
+  "restarted": true
+}
+```
+
+```json
+{
+  "engine": "gateway.reverse_image:saucenao",
+  "secret": "secrets.search.reverse_image.saucenao.api_key",
+  "changed": ["secrets.search.reverse_image.saucenao.api_key"],
+  "restart": "all",
+  "restarted": true
 }
 ```
 
@@ -447,6 +508,9 @@ MISSING_SECRET     缺 api_key / token
 MISSING_DEPENDENCY 缺配置依赖（如 weibo.enabled）
 ENGINE_NOT_FOUND   引擎名不存在
 ENGINE_AMBIGUOUS   裸名命中多个 group，需用 group:name 限定
+ENGINE_NO_ROUTING  该引擎 group 不支持路由策略
+ENGINE_NO_SECRET   引擎没有可配置的密钥依赖
+ENGINE_SECRET_AMBIGUOUS 多个密钥依赖需要 --name 指定
 PLUGIN_UNKNOWN     插件名不存在
 PLUGIN_FAILED      插件安装/卸载失败
 BACKEND_DOWN       需要后端在线但不可达
@@ -518,5 +582,4 @@ scripts/update-adlist.sh                改为 asg adlist
 - `state.json` / `desired.json` / 控制 socket；
 - 环境变量指定安装根；
 - `asg setup`：安装仍走 `install.sh` / `install.ps1`；
-- `resident` / `rotating` 路由编辑（第一版只显示）；
 - 引擎对象的统一抽象（第一版按 `kind` 分支，后续再做）。

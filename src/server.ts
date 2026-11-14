@@ -95,12 +95,16 @@ interface SharedExtensions {
 let sharedExtensions: Promise<SharedExtensions> | null = null;
 
 function getExtensions(
-  _settings: Settings,
-  _secrets: Secrets,
+  settings: Settings,
+  secrets: Secrets,
   logger: Logger,
 ): Promise<SharedExtensions> {
   if (!sharedExtensions) {
-    sharedExtensions = loadExtensions(process.cwd(), { logger })
+    sharedExtensions = loadExtensions(process.cwd(), {
+      logger,
+      extensionConfig: settings.extensions,
+      extensionSecrets: secrets.extensions,
+    })
       .then((loaded) => {
         for (const error of loaded.errors) {
           logger.warn(`扩展 ${error.id} 加载失败：${error.error}`);

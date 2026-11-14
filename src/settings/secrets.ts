@@ -58,6 +58,13 @@ const browserSecretsSchema = z
   })
   .strict();
 
+/**
+ * 第三方扩展密钥：`extensions.<engineId>.<secretName>`。
+ *
+ * 值同样支持 `env:NAME`，由 `resolveSecretTree` 统一解析。
+ */
+const extensionSecretsSchema = z.record(z.string(), z.record(z.string(), z.string())).default({});
+
 export const secretsSchema = z
   .object({
     gateway: gatewaySecretsSchema.default(() => gatewaySecretsSchema.parse({})),
@@ -65,6 +72,7 @@ export const secretsSchema = z
     search: searchSecretsSchema.default(() => searchSecretsSchema.parse({})),
     bilibili: bilibiliSecretsSchema.default(() => bilibiliSecretsSchema.parse({})),
     browser: browserSecretsSchema.default(() => browserSecretsSchema.parse({})),
+    extensions: extensionSecretsSchema,
   })
   .strict();
 

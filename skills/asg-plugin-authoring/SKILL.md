@@ -229,9 +229,15 @@ export const engine = weiboProvider;
 | `group` | `"gateway.search"`（文本源）或 `"gateway.reverse_image"`（图搜源） |
 | `kind` | 固定 `"gateway"` |
 | `routing(ctx)` | 返回 `category:<name>`，用于类别分发 |
+| `requires` | 人类可读的前置条件；`secret:<name>` 表示需要用户在 CLI 配置的扩展密钥 |
 | `available(ctx)` | 前置条件（密钥、上游开关） |
 | `enabled?(ctx)` | 引擎自身开关；`enabledPath` 指向写入 `gateway.yaml` 的布尔路径 |
 | `runtime` | `{ kind: "search", plan, search }` 或 `{ kind: "reverse_image", search }` |
+
+扩展密钥：在 `requires` 里写 `secret:<name>`，用户执行
+`asg engines secret <engine> --name <name> --stdin` 后，运行期从
+`ctx.pluginSecrets[<name>]` 读取（已解析 `env:NAME`，空值不注入）。没配置时宿主会把
+`available()` 判为 false，插件内部仍应处理密钥缺失。
 
 文本源（`gateway.search`）：
 
@@ -247,6 +253,10 @@ runtime: {
   },
 }
 ```
+
+用户可以用 `asg engines route <engine> --category <name> [--hot-category <name>]`
+覆盖插件的 `routing()` / `plan()`（写 `gateway.yaml` 的 `extensions.<engineId>.routing`），
+所以插件要把 `plan` 只当默认策略，不要在 `plan` 里做不可退让的副作用。
 
 图搜源（`gateway.reverse_image`）：
 

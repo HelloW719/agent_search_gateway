@@ -143,7 +143,7 @@ export GITHUB_TOKEN=ghp_xxx
 
 ## 7. 运行时加载
 
-网关启动时（`createServer` 首次调用，进程级只执行一次）以及 `asg engines list|enable|disable`
+网关启动时（`createServer` 首次调用，进程级只执行一次）以及 `asg engines list|enable|disable|route|secret`
 会扫描 `data/extensions`：
 
 1. 读取 `data/extensions/<id>/asg-plugin.json`，校验 `api_version === 1`，目录名必须等于 `manifest.id`。
@@ -153,6 +153,17 @@ export GITHUB_TOKEN=ghp_xxx
    - `engine`：搜索源对象（`id` / `group` / `name` / `runtime` 等）。
 4. 同一批外部插件内 id 重复视为扩展自身错误；重复插件会被跳过并记录错误。
 5. 单个插件加载失败只影响该插件，不影响网关启动与其它插件。
+
+引擎插件的用户级配置不进 manifest：
+
+```bash
+asg engines route gateway.search:weibo --category news --hot-category news_hot
+asg engines secret gateway.search:weibo --name cookie --stdin
+```
+
+- 路由写入 `gateway.yaml` 的 `extensions.<engineId>.routing`，覆盖插件的 `routing()` / `plan()`；
+- 密钥写入 `secrets.yaml` 的 `extensions.<engineId>.<name>`，支持 `env:NAME`，
+  运行期通过 `ctx.pluginSecrets` 注入；插件用 `requires: ["secret:<name>"]` 声明依赖。
 
 插件不得 import 网关内部模块，也不得依赖宿主 `node_modules` 中的非内置包；
 需要跨进程能力时应通过 CLI / HTTP 自行实现。

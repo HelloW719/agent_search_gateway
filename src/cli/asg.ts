@@ -16,7 +16,7 @@ const USAGE = `用法: asg <命令> [选项]
   serve                       前台 supervisor（供服务管理器调用）
   logs [service...] [-f]      日志；默认合并 gateway + supervisor
   config get|set|validate      gateway.yaml / secrets.yaml
-  engines list|enable|disable  搜索引擎（searxng + 网关原生源）
+  engines list|enable|disable|route|secret  搜索引擎（searxng + 网关原生源）
   plugins list|install|remove  外部后端
   extensions search|install|list|remove  第三方插件
   browser status|install       Playwright 浏览器

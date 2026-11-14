@@ -144,6 +144,33 @@ export function setYamlPath(doc: Document.Parsed, path: YamlPath, value: unknown
   doc.setIn(path as string[], value);
 }
 
+/**
+ * 删除点号路径；返回该路径此前是否存在。
+ *
+ * 删除后向上清理空对象（例如删掉 `extensions.<id>.routing` 后留下空 routing /
+ * 空 engine 条目），但保留顶层段（如 `extensions: {}`）。
+ */
+export function deleteYamlPath(doc: Document.Parsed, path: YamlPath): boolean {
+  if (path.length === 0) {
+    throw new CliError("CONFIG_INVALID", EXIT.INVALID, "配置路径不能为空");
+  }
+
+  const existed = doc.hasIn(path as string[]);
+  doc.deleteIn(path as string[]);
+
+  for (let depth = path.length - 1; depth >= 2; depth -= 1) {
+    const parent = path.slice(0, depth);
+    const node = doc.getIn(parent as string[], true);
+    if (isMap(node) && node.items.length === 0) {
+      doc.deleteIn(parent as string[]);
+      continue;
+    }
+    break;
+  }
+
+  return existed;
+}
+
 /** CLI 值语法：先 JSON.parse，失败按字符串；--string 强制字符串。 */
 export function parseConfigValue(raw: string, forceString = false): unknown {
   if (forceString) return raw;

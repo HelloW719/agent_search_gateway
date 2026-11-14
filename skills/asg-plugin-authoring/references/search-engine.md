@@ -25,6 +25,7 @@ export interface EngineProvider {
 export interface EngineProviderContext {
   config: Record<string, unknown>;   // 与 gateway.yaml 同形
   secrets: Record<string, unknown>;  // 与 secrets.yaml 同形
+  pluginSecrets?: Record<string, string>; // 扩展密钥（已解析，空值不注入）
   logger?: Logger;
 }
 ```
@@ -43,6 +44,8 @@ runtime: {
 ```
 
 - `routing` 返回类别名列表：`["category:weibo", "category:weibo_hot"]`；
+- 用户可以用 `asg engines route <engine> --category <name> [--hot-category <name>]` 覆盖
+  `routing` / `plan`（宿主合成的 plan 优先 hot，再普通类别）；`--clear` 恢复插件默认；
 - `plan` 只在类别命中时返回计划；不命中返回 `undefined`（宿主继续其它引擎）；
 - `categories` 是逗号分隔字符串，大小写不敏感，用 `hasCategory(categories, name)` 判断；
 - `hot: true` 表示热榜/热搜类查询，不需要关键词，`query` 可能为空；
@@ -87,7 +90,10 @@ type SourceCall =
 - `enabled(ctx)`：引擎自身开关；
 - `enabledPath`：该布尔值在 `gateway.yaml` 中的路径（如 `["search", "weibo", "enabled"]`），
   `asg` 写回配置时使用；
-- `requires`：人类可读的前置条件，例如 `["config:weibo.enabled"]`。
+- `requires`：人类可读的前置条件，例如 `["config:weibo.enabled"]`；
+  `secret:<name>` 表示扩展密钥，读 `ctx.pluginSecrets[<name>]`，由
+  `asg engines secret <engine> --name <name> --stdin` 写入 `secrets.yaml` 的
+  `extensions.<engineId>.<name>`；缺失时宿主强制 `available()` 为 false。
 
 ## 示例
 

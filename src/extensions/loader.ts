@@ -11,9 +11,11 @@ import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { EngineProvider } from "../engines/provider.js";
+import type { EngineProvider, EngineProviderContext } from "../engines/provider.js";
 import type { FetchPlugin } from "../fetch/plugins/types.js";
 import type { Logger } from "../logger.js";
+import { hasCategory } from "../search/category.js";
+import { resolveSecretValue } from "../settings/secret-ref.js";
 import { extensionsDir } from "./install.js";
 import { parseManifest, type ExtensionManifest } from "./manifest.js";
 
@@ -31,6 +33,12 @@ export type ExtensionModuleImporter = (url: string) => Promise<unknown>;
 export interface LoadExtensionsOptions {
   logger?: Logger;
   importModule?: ExtensionModuleImporter;
+  /** gateway.yaml 的 `extensions` 段（按完整 engineId 索引）。CLI 可能传未经 schema 校验的原始值。 */
+  extensionConfig?: Record<string, unknown>;
+  /** secrets.yaml 的 `extensions` 段（按完整 engineId 索引）。 */
+  extensionSecrets?: Record<string, unknown>;
+  /** 解析 `env:NAME` 用的环境变量，默认 process.env。 */
+  env?: NodeJS.ProcessEnv;
 }
 
 const DEFAULT_IMPORT: ExtensionModuleImporter = (url) => import(url);
@@ -113,6 +121,130 @@ function toEngineProvider(manifest: ExtensionManifest, raw: Record<string, unkno
         : () => true,
     runtime: raw.runtime as unknown as EngineProvider["runtime"],
   };
+}
+
+interface ExtensionRouting {
+  category?: string;
+  /** 类别名的原样值；匹配时由 hasCategory 负责大小写与逗号分隔。 */
+  hotCategory?: string;
+}
+
+/** 按 engineId 取 `extensions` 段里的条目；非对象一律忽略（CLI 可能传未校验值）。 */
+function extensionEntry(value: unknown, engineId: string): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const entry = value[engineId];
+  return isRecord(entry) ? entry : undefined;
+}
+
+function trimmedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** 读取路由覆盖；只接受非空字符串，其余字段忽略。 */
+function routingOf(entry: Record<string, unknown> | undefined): ExtensionRouting {
+  const routing = isRecord(entry?.routing) ? entry.routing : {};
+  return {
+    category: trimmedString(routing.category),
+    hotCategory: trimmedString(routing.hot_category),
+  };
+}
+
+/** 把扩展密钥解析成插件可见的扁平 map；空值不注入。 */
+function pluginSecretsOf(
+  entry: Record<string, unknown> | undefined,
+  env: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!entry) return out;
+  for (const [name, raw] of Object.entries(entry)) {
+    if (typeof raw !== "string") continue;
+    const value = resolveSecretValue(raw, env);
+    if (value.trim().length > 0) out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * 用 gateway.yaml / secrets.yaml 的 `extensions` 段包装插件 provider。
+ *
+ * 只在确有配置（路由 / 密钥 / `secret:` 依赖）时包装；未配置的插件保持原对象，
+ * 运行期与 CLI 的行为完全不变。
+ */
+function withExtensionOptions(
+  provider: EngineProvider,
+  pluginSecrets: Record<string, string>,
+  routing: ExtensionRouting,
+): EngineProvider {
+  const hasRouting = routing.category !== undefined || routing.hotCategory !== undefined;
+  const requiredSecrets = (provider.requires ?? []).filter((item) =>
+    item.startsWith("secret:"),
+  );
+
+  const augment = (ctx: EngineProviderContext): EngineProviderContext =>
+    Object.keys(pluginSecrets).length > 0 ? { ...ctx, pluginSecrets } : ctx;
+
+  const routingList = (): string[] => {
+    const list: string[] = [];
+    if (routing.category) list.push(`category:${routing.category}`);
+    if (routing.hotCategory) list.push(`category:${routing.hotCategory}`);
+    return list;
+  };
+
+  const plan = (categories: string | undefined): { hot: boolean } | undefined => {
+    if (routing.hotCategory && hasCategory(categories, routing.hotCategory)) return { hot: true };
+    if (routing.category && hasCategory(categories, routing.category)) return { hot: false };
+    return undefined;
+  };
+
+  const runtime = provider.runtime;
+  let wrappedRuntime = runtime;
+  if (runtime?.kind === "reverse_image") {
+    wrappedRuntime = {
+      kind: "reverse_image",
+      search: (input, ctx) => runtime.search(input, augment(ctx)),
+    };
+  } else if (runtime?.kind === "search") {
+    wrappedRuntime = {
+      kind: "search",
+      plan: (categories, ctx) =>
+        hasRouting ? plan(categories) : runtime.plan(categories, augment(ctx)),
+      search: (query, searchOptions, ctx) => runtime.search(query, searchOptions, augment(ctx)),
+    };
+  }
+
+  return {
+    ...provider,
+    routing: (ctx) => (hasRouting ? routingList() : provider.routing(augment(ctx))),
+    available: (ctx) => {
+      if (!provider.available(augment(ctx))) return false;
+      return requiredSecrets.every((item) => {
+        const name = item.slice("secret:".length);
+        return (pluginSecrets[name] ?? "").trim().length > 0;
+      });
+    },
+    enabled: provider.enabled ? (ctx) => provider.enabled!(augment(ctx)) : undefined,
+    runtime: wrappedRuntime,
+  };
+}
+
+/** 按 engineId 合并扩展配置；没有任何扩展配置时直接返回原 provider。 */
+function applyExtensionOptions(
+  provider: EngineProvider,
+  options: LoadExtensionsOptions,
+): EngineProvider {
+  const configEntry = extensionEntry(options.extensionConfig, provider.id);
+  const secretEntry = extensionEntry(options.extensionSecrets, provider.id);
+  // 路由覆盖只对类别分流的文本源有意义；图搜源的 routing 固定为 source。
+  const routing = provider.group === "gateway.search" ? routingOf(configEntry) : {};
+  const hasRouting = routing.category !== undefined || routing.hotCategory !== undefined;
+  const hasSecretRequirement = (provider.requires ?? []).some((item) =>
+    item.startsWith("secret:"),
+  );
+
+  if (!hasRouting && !secretEntry && !hasSecretRequirement) return provider;
+
+  const pluginSecrets = pluginSecretsOf(secretEntry, options.env ?? process.env);
+  return withExtensionOptions(provider, pluginSecrets, routing);
 }
 
 /**
@@ -207,7 +339,10 @@ export async function loadExtensions(
         fail(result, logger, manifest.id, "入口未导出 engine 对象");
       } else {
         try {
-          const provider = toEngineProvider(manifest, mod.engine);
+          const provider = applyExtensionOptions(
+            toEngineProvider(manifest, mod.engine),
+            opts,
+          );
           if (result.engines.some((item) => item.id === provider.id)) {
             fail(result, logger, manifest.id, `search 插件 id 重复：${provider.id}`);
           } else {

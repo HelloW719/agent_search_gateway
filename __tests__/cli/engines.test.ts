@@ -12,7 +12,11 @@ import {
   readLocalEngines,
   setEngines,
 } from "../../src/cli/config/engines.js";
-import { run as enginesRun, setRestartForTests } from "../../src/cli/commands/engines.js";
+import {
+  run as enginesRun,
+  setRestartForTests,
+  setStdinReaderForTests,
+} from "../../src/cli/commands/engines.js";
 
 const reporter = new Reporter({ json: true, jsonl: false });
 const dirs: string[] = [];
@@ -86,6 +90,51 @@ function appendBaiduToSettings(root: string, disabled: boolean): void {
   fs.appendFileSync(file, `  - name: baidu\n    disabled: ${disabled}\n`, "utf8");
 }
 
+/** 安装一个最小 search 扩展，用于 gateway.search 的 route / secret 测试。 */
+function writeSearchExtension(
+  root: string,
+  options: { dir: string; name: string; requires?: string[] },
+): void {
+  const dir = path.join(root, "data", "extensions", options.dir);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "asg-plugin.json"),
+    JSON.stringify({
+      id: options.dir,
+      name: options.name,
+      version: "1.0.0",
+      api_version: 1,
+      provides: ["search"],
+      entry: "index.mjs",
+    }),
+    "utf8",
+  );
+  const requires = options.requires ? `  requires: ${JSON.stringify(options.requires)},\n` : "";
+  fs.writeFileSync(
+    path.join(dir, "index.mjs"),
+    [
+      "export const engine = {",
+      `  id: "gateway.search:${options.name}",`,
+      '  group: "gateway.search",',
+      `  name: ${JSON.stringify(options.name)},`,
+      '  kind: "gateway",',
+      `  displayName: ${JSON.stringify(`Demo ${options.name}`)},`,
+      "  routing: () => ['category:demo'],",
+      "  available: () => true,",
+      "  enabled: () => true,",
+      ...(requires ? [requires.trimEnd()] : []),
+      "  runtime: {",
+      '    kind: "search",',
+      "    plan: () => undefined,",
+      "    search: async () => ({ ok: false, error: { kind: 'api', message: 'x' }, latencyMs: 0 }),",
+      "  },",
+      "};",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+}
+
 function read(root: string, relative: string): string {
   return fs.readFileSync(path.join(root, relative), "utf8");
 }
@@ -125,6 +174,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setRestartForTests(null);
+  setStdinReaderForTests(null);
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -576,5 +626,339 @@ describe("组合与失败处理", () => {
     expect(read(root, SETTINGS_PATH)).toBe(settingsBefore);
     expect(read(root, "gateway.yaml")).toBe(configBefore);
     expect(restartCalls).toHaveLength(0);
+  });
+});
+
+describe("engines route", () => {
+  it("searxng resident / rotating 互斥写入", async () => {
+    const root = makeRoot();
+
+    await enginesRun({ root, reporter, rest: ["route", "searxng:bilibili", "rotating"] });
+
+    const config = parse(root, "gateway.yaml") as {
+      search: { engines: { resident: string[]; rotating: string[] } };
+    };
+    expect(config.search.engines.resident).toEqual([]);
+    expect(config.search.engines.rotating).toEqual(["tavily", "bilibili"]);
+    expect(restartCalls).toEqual([root]);
+  });
+
+  it("searxng none 从两个列表移除", async () => {
+    const root = makeRoot();
+
+    await enginesRun({ root, reporter, rest: ["route", "tavily", "none"] });
+
+    const config = parse(root, "gateway.yaml") as {
+      search: { engines: { resident: string[]; rotating: string[] } };
+    };
+    expect(config.search.engines.resident).toEqual(["bilibili"]);
+    expect(config.search.engines.rotating).toEqual([]);
+  });
+
+  it("searxng 位置策略不能与类别参数混用", async () => {
+    const root = makeRoot();
+    const before = read(root, "gateway.yaml");
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "bilibili", "resident", "--category", "news"] }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+
+    expect(read(root, "gateway.yaml")).toBe(before);
+    expect(restartCalls).toHaveLength(0);
+  });
+
+  it("gateway.search 写类别并能在 list 中看到", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, { dir: "demo-search", name: "demo" });
+
+    await enginesRun({
+      root,
+      reporter,
+      rest: ["route", "gateway.search:demo", "--category", "news", "--hot-category", "news_hot"],
+    });
+
+    const config = parse(root, "gateway.yaml") as {
+      extensions: Record<string, { routing: { category: string; hot_category: string } }>;
+    };
+    expect(config.extensions["gateway.search:demo"]!.routing).toEqual({
+      category: "news",
+      hot_category: "news_hot",
+    });
+    expect(restartCalls).toHaveLength(1);
+
+    const listed = await enginesRun({ root, reporter, rest: ["list"] });
+    const engines = (listed.data as { engines: Array<{ id: string; routing: string[] }> }).engines;
+    expect(engines.find((engine) => engine.id === "gateway.search:demo")!.routing).toEqual([
+      "category:news",
+      "category:news_hot",
+    ]);
+  });
+
+  it("gateway.search --clear 删除 routing 并清理空 extensions.<id>", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, { dir: "demo-search", name: "demo" });
+    await enginesRun({ root, reporter, rest: ["route", "gateway.search:demo", "--category", "news"] });
+
+    await enginesRun({ root, reporter, rest: ["route", "gateway.search:demo", "--clear"] });
+
+    const config = parse(root, "gateway.yaml") as { extensions?: unknown };
+    expect(config.extensions).toEqual({});
+    expect(restartCalls).toHaveLength(2);
+  });
+
+  it("gateway.search 必须至少给一个类别或 --clear", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, { dir: "demo-search", name: "demo" });
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "gateway.search:demo"] }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+    expect(restartCalls).toHaveLength(0);
+  });
+
+  it("gateway.search --clear 不能与类别同时使用", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, { dir: "demo-search", name: "demo" });
+
+    await expect(
+      enginesRun({
+        root,
+        reporter,
+        rest: ["route", "gateway.search:demo", "--clear", "--category", "news"],
+      }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+  });
+
+  it("类别名禁止逗号与空值", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, { dir: "demo-search", name: "demo" });
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "gateway.search:demo", "--category", "a,b"] }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "gateway.search:demo", "--category", "  "] }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+  });
+
+  it("gateway.reverse_image 报 ENGINE_NO_ROUTING", async () => {
+    const root = makeRoot();
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "gateway.reverse_image:baidu", "resident"] }),
+    ).rejects.toMatchObject({ code: "ENGINE_NO_ROUTING", exitCode: 4 });
+    expect(restartCalls).toHaveLength(0);
+  });
+
+  it("未知引擎与裸名歧义", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, { dir: "baidu-search", name: "baidu" });
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "gateway.search:nope", "--category", "news"] }),
+    ).rejects.toMatchObject({ code: "ENGINE_NOT_FOUND", exitCode: 4 });
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "baidu", "resident"] }),
+    ).rejects.toMatchObject({ code: "ENGINE_AMBIGUOUS", exitCode: 4 });
+  });
+
+  it("searxng 远端默认引擎在线确认后可设置路由", async () => {
+    const url = await listenConfig({ engines: [{ name: "bing", enabled: true }] });
+    const root = makeRoot({ searxngUrl: url });
+
+    await enginesRun({ root, reporter, rest: ["route", "bing", "resident"] });
+
+    const config = parse(root, "gateway.yaml") as {
+      search: { engines: { resident: string[]; rotating: string[] } };
+    };
+    expect(config.search.engines.resident).toEqual(["bilibili", "bing"]);
+    expect(config.search.engines.rotating).toEqual(["tavily"]);
+  });
+
+  it("校验失败不写文件", async () => {
+    const root = makeRoot({
+      config: gatewayConfig("http://127.0.0.1:1", ["  weibo:", "    enabled: true", "    bogus: 1"]),
+    });
+    const before = read(root, "gateway.yaml");
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["route", "bilibili", "rotating"] }),
+    ).rejects.toMatchObject({ code: "CONFIG_INVALID", exitCode: 4 });
+
+    expect(read(root, "gateway.yaml")).toBe(before);
+    expect(restartCalls).toHaveLength(0);
+  });
+});
+
+describe("engines secret", () => {
+  it("内置单密钥从 stdin 写入，secrets.yaml 权限 0600", async () => {
+    const root = makeRoot();
+    setStdinReaderForTests(async () => "abc-123\n");
+
+    const result = await enginesRun({
+      root,
+      reporter,
+      rest: ["secret", "saucenao", "--stdin"],
+    });
+
+    const secrets = parse(root, "secrets.yaml") as {
+      search: { reverse_image: { saucenao: { api_key: string } } };
+    };
+    expect(secrets.search.reverse_image.saucenao.api_key).toBe("abc-123");
+    expect(result.data).toMatchObject({
+      secret: "secrets.search.reverse_image.saucenao.api_key",
+      changed: ["secrets.search.reverse_image.saucenao.api_key"],
+    });
+    expect(fs.statSync(path.join(root, "secrets.yaml")).mode & 0o777).toBe(0o600);
+    expect(restartCalls).toEqual([root]);
+  });
+
+  it("多个依赖必须给 --name，短名与完整路径都可选", async () => {
+    const root = makeRoot();
+    setStdinReaderForTests(async () => "cookie-value\n");
+    writeSearchExtension(root, {
+      dir: "multi-search",
+      name: "multi",
+      requires: ["secret:cookie", "secret:token"],
+    });
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["secret", "gateway.search:multi", "--stdin"] }),
+    ).rejects.toMatchObject({ code: "ENGINE_SECRET_AMBIGUOUS", exitCode: 4 });
+
+    await enginesRun({
+      root,
+      reporter,
+      rest: ["secret", "gateway.search:multi", "--name", "cookie", "--stdin"],
+    });
+
+    const secrets = parse(root, "secrets.yaml") as {
+      extensions: Record<string, Record<string, string>>;
+    };
+    expect(secrets.extensions["gateway.search:multi"]).toEqual({ cookie: "cookie-value" });
+  });
+
+  it("未知 --name 报 MISSING_SECRET", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, {
+      dir: "demo-search",
+      name: "demo",
+      requires: ["secret:cookie"],
+    });
+
+    await expect(
+      enginesRun({
+        root,
+        reporter,
+        rest: ["secret", "gateway.search:demo", "--name", "nope", "--stdin"],
+      }),
+    ).rejects.toMatchObject({ code: "MISSING_SECRET", exitCode: 4 });
+  });
+
+  it("无密钥依赖且未给 --name 报 ENGINE_NO_SECRET", async () => {
+    const root = makeRoot();
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["secret", "tracemoe", "--stdin"] }),
+    ).rejects.toMatchObject({ code: "ENGINE_NO_SECRET", exitCode: 4 });
+  });
+
+  it("扩展 secret:name 省略 --name 时自动选择，并可 --clear", async () => {
+    const root = makeRoot();
+    setStdinReaderForTests(async () => "cookie-value\n");
+    writeSearchExtension(root, {
+      dir: "demo-search",
+      name: "demo",
+      requires: ["secret:cookie"],
+    });
+
+    await enginesRun({ root, reporter, rest: ["secret", "gateway.search:demo", "--stdin"] });
+
+    let secrets = parse(root, "secrets.yaml") as {
+      extensions: Record<string, Record<string, string>>;
+    };
+    expect(secrets.extensions["gateway.search:demo"]).toEqual({ cookie: "cookie-value" });
+
+    await enginesRun({
+      root,
+      reporter,
+      rest: ["secret", "gateway.search:demo", "--name", "secret:cookie", "--clear"],
+    });
+
+    secrets = parse(root, "secrets.yaml") as {
+      extensions: Record<string, Record<string, string>>;
+    };
+    expect(secrets.extensions).toEqual({});
+    expect(restartCalls).toHaveLength(2);
+  });
+
+  it("--stdin 与 --clear 冲突、都缺失、位置值都报 usage", async () => {
+    const root = makeRoot();
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["secret", "saucenao", "--stdin", "--clear"] }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["secret", "saucenao"] }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["secret", "saucenao", "plaintext-value", "--stdin"] }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", exitCode: 2 });
+    expect(restartCalls).toHaveLength(0);
+  });
+
+  it("stdin 空值报错且提示 --clear", async () => {
+    const root = makeRoot();
+    setStdinReaderForTests(async () => "\n");
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["secret", "saucenao", "--stdin"] }),
+    ).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("--clear"),
+    });
+    expect(fs.existsSync(path.join(root, "secrets.yaml"))).toBe(false);
+  });
+
+  it("校验失败时不写 secrets.yaml、不重启", async () => {
+    const root = makeRoot({
+      config: gatewayConfig("http://127.0.0.1:1", ["  weibo:", "    bogus: 1"]),
+    });
+    setStdinReaderForTests(async () => "abc\n");
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["secret", "saucenao", "--stdin"] }),
+    ).rejects.toMatchObject({ code: "CONFIG_INVALID", exitCode: 4 });
+
+    expect(fs.existsSync(path.join(root, "secrets.yaml"))).toBe(false);
+    expect(restartCalls).toHaveLength(0);
+  });
+
+  it("secret: 依赖满足后 list 的 available 变 true", async () => {
+    const root = makeRoot();
+    setStdinReaderForTests(async () => "cookie-value\n");
+    writeSearchExtension(root, {
+      dir: "demo-search",
+      name: "demo",
+      requires: ["secret:cookie"],
+    });
+
+    const before = await enginesRun({ root, reporter, rest: ["list"] });
+    const beforeEngine = (
+      before.data as { engines: Array<{ id: string; available: boolean }> }
+    ).engines.find((engine) => engine.id === "gateway.search:demo")!;
+    expect(beforeEngine.available).toBe(false);
+
+    await enginesRun({ root, reporter, rest: ["secret", "gateway.search:demo", "--stdin"] });
+
+    const after = await enginesRun({ root, reporter, rest: ["list"] });
+    const afterEngine = (
+      after.data as { engines: Array<{ id: string; available: boolean }> }
+    ).engines.find((engine) => engine.id === "gateway.search:demo")!;
+    expect(afterEngine.available).toBe(true);
   });
 });

@@ -12,6 +12,7 @@ import { readTextIfExists, writeConfigFile, writeFileAtomic } from "../config/ga
 import { validateConfigTexts } from "../config/validate.js";
 import { loadEngineContext } from "./context.js";
 import { dig } from "./shared.js";
+import { resolveSecretValue } from "../../settings/secret-ref.js";
 import { GatewayStore } from "./stores/gateway.js";
 import { SearxngStore } from "./stores/searxng.js";
 import type {
@@ -35,6 +36,20 @@ function localRecords(ctx: EngineContext): EngineRecord[] {
 /** 本地视图：只读 gateway.yaml / secrets.yaml / settings.yml，离线可用。 */
 export function readLocalEngines(root: string): EngineRecord[] {
   return localRecords(loadEngineContext(root));
+}
+
+/**
+ * 把单个引擎引用解析成唯一记录（`route` / `secret` 使用）。
+ *
+ * 与 enable/disable 共用 parseEngineRef + resolveRecords 语义：支持 `group:name`，
+ * 裸名命中多个 group 时报 ENGINE_AMBIGUOUS。`knownSearxng` 用于 route 的在线兜底。
+ */
+export function resolveEngineRecord(
+  raw: string,
+  ctx: EngineContext,
+  knownSearxng: Iterable<string> = [],
+): EngineRecord {
+  return resolveRecords([raw], localRecords(ctx), new Set(knownSearxng))[0]!;
 }
 
 /** 本地列表；`all=true` 时叠加 searxng `/config` 的全量引擎。 */
@@ -131,10 +146,21 @@ function resolveRecords(
   });
 }
 
-function requirementSatisfied(requirement: string, ctx: EngineContext): boolean {
+function requirementSatisfied(
+  requirement: string,
+  ctx: EngineContext,
+  engineId: string,
+): boolean {
   if (requirement.startsWith("secrets.")) {
     const value = dig(ctx.secrets, requirement.split(".").slice(1));
     return typeof value === "string" && value.trim().length > 0;
+  }
+  if (requirement.startsWith("secret:")) {
+    const name = requirement.slice("secret:".length);
+    const value = dig(ctx.secrets, ["extensions", engineId, name]);
+    if (typeof value !== "string") return false;
+    // secrets.yaml 支持 env:NAME；判断“是否配置”必须看解析后的值。
+    return resolveSecretValue(value, process.env).trim().length > 0;
   }
   if (requirement.startsWith("config:")) {
     const value = dig(ctx.configPlain, requirement.slice("config:".length).split("."));
@@ -150,14 +176,19 @@ function requirementSatisfied(requirement: string, ctx: EngineContext): boolean 
 function checkRequirements(records: readonly EngineRecord[], ctx: EngineContext): void {
   const missing: Array<{ engine: string; requires: string[] }> = [];
   for (const record of records) {
-    const lacks = (record.requires ?? []).filter((requirement) => !requirementSatisfied(requirement, ctx));
+    const lacks = (record.requires ?? []).filter(
+      (requirement) => !requirementSatisfied(requirement, ctx, record.id),
+    );
     if (lacks.length > 0) missing.push({ engine: record.id, requires: lacks });
   }
   if (missing.length === 0) return;
 
   const summary = missing.map((item) => `${item.engine} 需要 ${item.requires.join(", ")}`).join("；");
   const lacksSecret = missing.some((item) =>
-    item.requires.some((requirement) => requirement.startsWith("secrets.")),
+    item.requires.some(
+      (requirement) =>
+        requirement.startsWith("secrets.") || requirement.startsWith("secret:"),
+    ),
   );
   if (lacksSecret) {
     throw new CliError("MISSING_SECRET", EXIT.INVALID, `缺少密钥，拒绝启用：${summary}`, { missing });

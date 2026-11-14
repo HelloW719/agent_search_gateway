@@ -285,3 +285,65 @@ bilibili:
     expect(() => load(d2)).toThrow(/校验失败/);
   });
 });
+
+describe("extensions 配置", () => {
+  it("旧配置省略 extensions 时默认空对象", () => {
+    const d = tempDir();
+    writeFile(d, "gateway.yaml", "gateway:\n  host: 127.0.0.1\n");
+    const { settings, secrets } = load(d);
+    expect(settings.extensions).toEqual({});
+    expect(secrets.extensions).toEqual({});
+  });
+
+  it("读取 extensions.<engineId>.routing", () => {
+    const d = tempDir();
+    writeFile(
+      d,
+      "gateway.yaml",
+      `
+extensions:
+  "gateway.search:weibo":
+    routing:
+      category: news
+      hot_category: news_hot
+`,
+    );
+    const { settings } = load(d);
+    expect(settings.extensions["gateway.search:weibo"]!.routing).toEqual({
+      category: "news",
+      hot_category: "news_hot",
+    });
+  });
+
+  it("extensions 未知字段报错（strict）", () => {
+    const d = tempDir();
+    writeFile(
+      d,
+      "gateway.yaml",
+      `
+extensions:
+  "gateway.search:weibo":
+    routing:
+      category: news
+    bogus: 1
+`,
+    );
+    expect(() => load(d)).toThrow(/校验失败/);
+  });
+
+  it("secrets.extensions 支持 env:NAME 解析", () => {
+    const d = tempDir();
+    writeFile(d, "gateway.yaml", "gateway:\n  host: 127.0.0.1\n");
+    writeFile(
+      d,
+      "secrets.yaml",
+      `
+extensions:
+  "gateway.search:weibo":
+    cookie: env:WEIBO_COOKIE
+`,
+    );
+    const { secrets } = load(d, { WEIBO_COOKIE: "cookie-value" });
+    expect(secrets.extensions["gateway.search:weibo"]).toEqual({ cookie: "cookie-value" });
+  });
+});

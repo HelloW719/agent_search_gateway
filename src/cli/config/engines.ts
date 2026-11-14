@@ -17,4 +17,10 @@ export type EngineInfo = EngineRecord;
 
 export type SetEnginesResult = { changed: string[] };
 
-export { readLocalEngines, listEngines, setEngines, parseEngineRef } from "../engines/catalog.js";
+export {
+  readLocalEngines,
+  listEngines,
+  setEngines,
+  parseEngineRef,
+  resolveEngineRecord,
+} from "../engines/catalog.js";

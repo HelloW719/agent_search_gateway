@@ -468,6 +468,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 - settings.yml 是独立配置文件，**不要放 `/tmp`**（重启会丢）
 - `settings.yml` 由一键安装器从 `searxng-ext/settings.template.yml` 渲染；手改后重装会被覆盖，改模板或改生成后的文件并重启
 - 引擎开关用 `asg engines enable/disable <name|group:name>`；searxng 引擎写 settings.yml，网关源写 gateway.yaml，然后整栈重启（会断开 MCP 连接）
+- 引擎路由用 `asg engines route`：searxng 引擎设 `resident` / `rotating` / `none`，文本源设 `--category` / `--hot-category`；密钥用 `asg engines secret <engine> --stdin`（值只从 stdin 读）
 - 裸名冲突时用限定名区分：`searxng:baidu` / `gateway.reverse_image:baidu`；微博搜索用 `gateway.search:weibo`（依赖顶层 `weibo.enabled: true`）
 
 ### 广告过滤（StevenBlack hosts）
@@ -536,6 +537,8 @@ asg start | stop | restart                 # 整栈启停
 asg logs [gateway|searxng|flaresolverr|supervisor|all] [-f]
 asg config get|set|validate
 asg engines list [--all] | enable <name|group:name> | disable <name|group:name>
+asg engines route <engine> resident|rotating|none | --category <name> [--hot-category <name>] | --clear
+asg engines secret <engine> [--name <name>] --stdin | --clear
 asg plugins list|install|remove
 asg browser status|install [--full]
 asg adlist update

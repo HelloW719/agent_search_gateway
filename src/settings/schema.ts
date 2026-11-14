@@ -339,6 +339,26 @@ export const corpusSchema = z
   })
   .strict();
 
+/**
+ * 第三方扩展的网关配置（按完整 engineId 索引）。
+ *
+ * 当前只承载路由覆盖：插件自身有默认类别，用户在这里按引擎改写。
+ */
+const extensionRoutingSchema = z
+  .object({
+    category: z.string().optional(),
+    hot_category: z.string().optional(),
+  })
+  .strict();
+
+const extensionSchema = z
+  .object({
+    routing: extensionRoutingSchema.default(() => extensionRoutingSchema.parse({})),
+  })
+  .strict();
+
+export const extensionsSchema = z.record(z.string(), extensionSchema).default({});
+
 export const settingsSchema = z
   .object({
     gateway: gatewaySchema.default(() => gatewaySchema.parse({})),
@@ -354,5 +374,6 @@ export const settingsSchema = z
     browser: browserSchema.default(() => browserSchema.parse({})),
     embedding: embeddingSchema.default(() => embeddingSchema.parse({})),
     corpus: corpusSchema.default(() => corpusSchema.parse({})),
+    extensions: extensionsSchema,
   })
   .strict();

@@ -271,3 +271,204 @@ describe("外部插件注册", () => {
     expect(matched?.displayName).toBe("外部 B 站");
   });
 });
+
+describe("扩展配置覆盖（routing / secret）", () => {
+  const ctx = { config: {}, secrets: {} } as const;
+
+  it("routing.category / hot_category 同步覆盖 routing() 与 plan()", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      ENGINE_ENTRY,
+    );
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: {
+        "gateway.search:demo": {
+          routing: { category: "news", hot_category: "news_hot" },
+        },
+      },
+    });
+
+    const provider = loaded.engines[0]!;
+    expect(provider.routing(ctx)).toEqual(["category:news", "category:news_hot"]);
+    const runtime = provider.runtime!;
+    if (runtime.kind !== "search") throw new Error("expected search runtime");
+    expect(runtime.plan("foo, NEWS_HOT", ctx)).toEqual({ hot: true });
+    expect(runtime.plan("news", ctx)).toEqual({ hot: false });
+    expect(runtime.plan("other", ctx)).toBeUndefined();
+  });
+
+  it("只覆盖普通类别时 hot 不命中", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      ENGINE_ENTRY,
+    );
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "gateway.search:demo": { routing: { category: "news" } } },
+    });
+    const runtime = loaded.engines[0]!.runtime!;
+    if (runtime.kind !== "search") throw new Error("expected search runtime");
+    expect(loaded.engines[0]!.routing(ctx)).toEqual(["category:news"]);
+    expect(runtime.plan("news", ctx)).toEqual({ hot: false });
+    expect(runtime.plan("news_hot", ctx)).toBeUndefined();
+  });
+
+  it("pluginSecrets 注入到插件 plan/search", async () => {
+    const root = tempRoot();
+    const entry = [
+      "export const engine = {",
+      '  id: "gateway.search:demo",',
+      '  group: "gateway.search",',
+      '  name: "demo",',
+      '  kind: "gateway",',
+      '  displayName: "Demo",',
+      "  routing: () => ['category:demo'],",
+      "  available: () => true,",
+      "  runtime: {",
+      '    kind: "search",',
+      "    plan: (categories, ctx) => (ctx.pluginSecrets?.cookie ? { hot: true } : undefined),",
+      "    search: async () => ({ ok: false, error: { kind: 'api', message: 'x' }, latencyMs: 0 }),",
+      "  },",
+      "};",
+      "",
+    ].join("\n");
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      entry,
+    );
+
+    const loaded = await loadExtensions(root, {
+      extensionSecrets: { "gateway.search:demo": { cookie: "env:DEMO_COOKIE" } },
+      env: { DEMO_COOKIE: "cookie-value" },
+    });
+    const runtime = loaded.engines[0]!.runtime!;
+    if (runtime.kind !== "search") throw new Error("expected search runtime");
+    expect(runtime.plan("demo", ctx)).toEqual({ hot: true });
+
+    const missing = await loadExtensions(root, {
+      extensionSecrets: { "gateway.search:demo": { cookie: "env:DEMO_COOKIE" } },
+      env: {},
+    });
+    const missingRuntime = missing.engines[0]!.runtime!;
+    if (missingRuntime.kind !== "search") throw new Error("expected search runtime");
+    expect(missingRuntime.plan("demo", ctx)).toBeUndefined();
+  });
+
+  it("secret: 依赖缺失时 available=false，含 env: 解析", async () => {
+    const root = tempRoot();
+    const entry = [
+      "export const engine = {",
+      '  id: "gateway.search:demo",',
+      '  group: "gateway.search",',
+      '  name: "demo",',
+      '  kind: "gateway",',
+      '  displayName: "Demo",',
+      "  routing: () => ['category:demo'],",
+      "  available: () => true,",
+      '  requires: ["secret:cookie"],',
+      "  runtime: {",
+      '    kind: "search",',
+      "    plan: () => undefined,",
+      "    search: async () => ({ ok: false, error: { kind: 'api', message: 'x' }, latencyMs: 0 }),",
+      "  },",
+      "};",
+      "",
+    ].join("\n");
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      entry,
+    );
+
+    const missing = await loadExtensions(root);
+    expect(missing.engines[0]!.available(ctx)).toBe(false);
+
+    const unresolved = await loadExtensions(root, {
+      extensionSecrets: { "gateway.search:demo": { cookie: "env:DEMO_COOKIE" } },
+      env: {},
+    });
+    expect(unresolved.engines[0]!.available(ctx)).toBe(false);
+
+    const satisfied = await loadExtensions(root, {
+      extensionSecrets: { "gateway.search:demo": { cookie: "env:DEMO_COOKIE" } },
+      env: { DEMO_COOKIE: "cookie-value" },
+    });
+    expect(satisfied.engines[0]!.available(ctx)).toBe(true);
+  });
+
+  it("未配置扩展时不改变插件默认行为", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      ENGINE_ENTRY,
+    );
+
+    const loaded = await loadExtensions(root);
+    const provider = loaded.engines[0]!;
+    expect(provider.routing(ctx)).toEqual(["category:demo"]);
+    const runtime = provider.runtime!;
+    if (runtime.kind !== "search") throw new Error("expected search runtime");
+    expect(runtime.plan("anything", ctx)).toBeUndefined();
+  });
+
+  it("防御性忽略非对象的扩展配置", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      ENGINE_ENTRY,
+    );
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "gateway.search:demo": "not-an-object" } as never,
+      extensionSecrets: { "gateway.search:demo": ["nope"] } as never,
+    });
+    expect(loaded.engines[0]!.routing(ctx)).toEqual(["category:demo"]);
+  });
+
+  it("图搜源的 routing 不受 extensions.routing 影响", async () => {
+    const root = tempRoot();
+    const entry = [
+      "export const engine = {",
+      '  id: "gateway.reverse_image:demo",',
+      '  group: "gateway.reverse_image",',
+      '  name: "demo",',
+      '  kind: "gateway",',
+      '  displayName: "Demo 图搜",',
+      "  routing: () => ['source'],",
+      "  available: () => true,",
+      "  runtime: {",
+      '    kind: "reverse_image",',
+      "    search: async () => ({ ok: true, results: [], latencyMs: 0 }),",
+      "  },",
+      "};",
+      "",
+    ].join("\n");
+    writeExtension(
+      root,
+      "demo-image",
+      manifest({ id: "demo-image", name: "Demo 图搜", provides: ["search"] }),
+      entry,
+    );
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: {
+        "gateway.reverse_image:demo": { routing: { category: "news" } },
+      },
+    });
+    expect(loaded.engines[0]!.routing(ctx)).toEqual(["source"]);
+  });
+});
