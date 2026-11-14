@@ -256,8 +256,8 @@ describe("坏包隔离与校验", () => {
   });
 });
 
-describe("外部插件覆盖内置", () => {
-  it("加载官方 id 后由 createFetchRegistry 覆盖内置同 id", async () => {
+describe("外部插件注册", () => {
+  it("加载官方 id 后注册到 fetch 注册表", async () => {
     const root = tempRoot();
     writeExtension(root, "bilibili", manifest({ id: "bilibili", name: "外部 B 站" }), FETCH_ENTRY);
 
@@ -265,7 +265,7 @@ describe("外部插件覆盖内置", () => {
     expect(loaded.fetch.map((plugin) => plugin.id)).toEqual(["bilibili"]);
 
     const registry = createFetchRegistry(loaded.fetch);
-    expect(registry.list().map((plugin) => plugin.id)).toEqual(["cnki", "bilibili", "weibo"]);
+    expect(registry.list().map((plugin) => plugin.id)).toEqual(["bilibili"]);
     const matched = registry.find(new URL("https://example.com/a"), {} as never);
     expect(matched?.id).toBe("bilibili");
     expect(matched?.displayName).toBe("外部 B 站");

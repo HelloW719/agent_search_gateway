@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { bilibiliPlugin } from "../src/bilibili/index.js";
-import { cnkiPlugin } from "../src/fetch/plugins/cnki.js";
 import { runCliProcess } from "../src/fetch/channels/cli.js";
 import { CHANNELS, normalizeChannel } from "../src/fetch/channels/registry.js";
-import { weiboPlugin } from "../src/weibo/index.js";
 
 describe("通道规范化", () => {
   it("别名与规范 ID 都能归一化", () => {
@@ -36,16 +33,6 @@ describe("通道规范化", () => {
       "weibo:opencli",
       "cnki:http",
     ]);
-  });
-
-  it("三个插件的 channels 与注册表一致", () => {
-    expect(bilibiliPlugin.channels?.map((channel) => channel.id)).toEqual([
-      "bilibili:kukemc",
-      "bilibili:ytdlp",
-      "bilibili:article",
-    ]);
-    expect(weiboPlugin.channels?.map((channel) => channel.id)).toEqual(["weibo:opencli"]);
-    expect(cnkiPlugin.channels?.map((channel) => channel.id)).toEqual(["cnki:http"]);
   });
 });
 

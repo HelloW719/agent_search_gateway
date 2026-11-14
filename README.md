@@ -68,6 +68,8 @@ gateway (本服务, :3000/mcp)
 
 ## B 站抓取
 
+> 需先安装官方插件：`asg extensions install djasdh/agent-search-gateway-plugin-bilibili@0.1.0`。
+
 全部走 `fetch`，不新增工具；B 站视频/专栏 URL 会被插件自动接管，不需要额外参数。默认关闭，在 `gateway.yaml` 里把 `bilibili.enabled` 设为 `true`。
 
 | 请求 | 说明 |
@@ -95,6 +97,8 @@ gateway (本服务, :3000/mcp)
 - 未安装后端或 `bilibili.enabled=false` 时，B 站 URL 会明确返回 `BILI_UNAVAILABLE`，不会静默回退成抓网页。
 
 ## 微博抓取
+
+> 需先安装官方插件：`asg extensions install djasdh/agent-search-gateway-plugin-weibo@0.1.0`。
 
 全部走 `fetch`，不新增工具；默认关闭。普通微博页面 URL 带 `?weibo=` 才接管；`sinaimg.cn` 图片 URL 自动接管为附件。
 
@@ -266,6 +270,24 @@ curl -fsSL .../install.sh | bash -s -- --searxng-url http://192.168.1.10:8888
 
 代理环境请设置 `HTTPS_PROXY`（或 `https_proxy`）。安装完成后用 `node ~/agent_search_gateway/bin/asg.mjs start` 或注册的服务启动。
 
+## 官方插件
+
+0.3.4 起，Bilibili / 微博 / 知网不再内置，改为官方插件仓库：
+
+```bash
+asg extensions install djasdh/agent-search-gateway-plugin-bilibili@0.1.0
+asg extensions install djasdh/agent-search-gateway-plugin-weibo@0.1.0
+asg extensions install djasdh/agent-search-gateway-plugin-cnki@0.1.0
+asg extensions list
+asg restart
+```
+
+- 插件自己声明 `provides`：`fetch` / `search` / 两者；微博插件同时提供 `fetch` 与搜索源。
+- 安装位置：`data/extensions/<id>/`；卸载用 `asg extensions remove <id>`。
+- 插件与网关同进程运行，没有沙箱；只安装可信来源。
+- 发现：GitHub topic `asg-plugin`；`asg extensions search` 只列仓库，安装仍需显式执行。
+- 详细契约见 [`docs/extensions.md`](docs/extensions.md)。
+
 ## 快速开始（源码）
 
 ```bash
@@ -359,7 +381,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 | `application/pdf` | `unpdf` 抽正文（含页数标注）；扫描件无文本层则落盘 |
 | 图片 / 压缩包 / 其它二进制 | 落盘，返回**本地路径 + `/files/<id>` 链接 + 大小 + sha256**，正文不注入上下文 |
 
-站点专用取件走**取件插件**（`src/fetch/plugins/`）：插件按 host 自报匹配、自管会话与逐跳重定向并完成全部下载，`fetch` 只落盘并给出路径/链接（ADR-0007 / 0009）。当前注册 **CNKI**：知网摘要页 → `#pdfDown` → 跟随 302 链取 `%PDF` 落盘（不在机构网段、未订购、或该文献只有 HTML 阅读版都会给出可读错误）。
+站点专用取件走**取件插件**：插件按 host 自报匹配、自管会话与逐跳重定向并完成全部下载，`fetch` 只落盘并给出路径/链接（ADR-0007 / 0009）。CNKI 由官方插件 `djasdh/agent-search-gateway-plugin-cnki` 提供（`asg extensions install ...`）：知网摘要页 → `#pdfDown` → 跟随 302 链取 `%PDF` 落盘（不在机构网段、未订购、或该文献只有 HTML 阅读版都会给出可读错误）。
 
 产物相关配置（`fetch` 块）：
 

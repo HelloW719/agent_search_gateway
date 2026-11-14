@@ -1,6 +1,6 @@
 # 抓取插件契约
 
-本文定义内置抓取插件（fetch plugin）与抓取通道（fetch channel）的统一契约：
+本文定义抓取插件（fetch plugin）与抓取通道（fetch channel）的统一契约：
 平台 ID、`match` / `enabled` / `available` 语义、密钥引用、结果 helper，以及通道层与
 `asg plugins` 的元数据对应关系。
 
@@ -101,7 +101,8 @@ export const bilibiliPlugin: FetchPlugin = {
 | `opencli` | `weibo` | `weibo:opencli` | `opencli` |
 
 `install` / `remove` 同时接受旧安装名、规范通道 ID 与通道别名；输出与 JSON
-始终使用规范 ID / 安装名。`cnki:http` 是内置平台，不是可安装插件。
+始终使用规范 ID / 安装名。`cnki:http` 是通道 ID，CNKI 取件插件通过
+`asg extensions install djasdh/agent-search-gateway-plugin-cnki` 安装，不走 `asg plugins`。
 
 ## 插件契约
 
@@ -187,22 +188,27 @@ errorResult(code, message, { status?, finalUrl?, hint? });
 - 失败：`ok: false` + `errorCode` / `errorMessage`，可选 `status`、`finalUrl`；
 - 插件自管 headers / cookies / 会话 / 逐跳重定向，网关只看产物。
 
-## 新增一个内置抓取插件
+## 新增一个抓取插件
 
-1. 在 `src/fetch/platforms.ts` 的 `PLATFORMS` 里登记规范 ID、显示名与别名。
-2. 新建 `src/<platform>/index.ts`（或 `src/fetch/plugins/<id>.ts`），实现
-   `FetchPlugin`：填写 `id` / `platform` / `name` / `displayName` /
+官方插件仓库：`djasdh/agent-search-gateway-plugin-{bilibili,weibo,cnki}`。
+第三方插件按 `docs/extensions.md` 的 manifest 与单文件 ESM 约定发布，核心不再内置平台实现。
+
+1. 在 `src/fetch/platforms.ts` 的 `PLATFORMS` 里登记规范 ID、显示名与别名（仅当需要新平台）。
+2. 在插件仓库实现 `FetchPlugin`：填写 `id` / `platform` / `name` / `displayName` /
    `capabilities` / `requires`，并实现 `match` 与 `fetch`。
 3. `match` 只做纯 URL 判断；开关写到 `enabled(ctx)`；维护面信息写到
    `available(ctx)` 与 `requires`；在 `channels` 里声明该平台实际使用的通道。
-4. 在 `src/fetch/plugins/index.ts` 的 `fetchPluginRegistry` 里按优先级注册；
-   如通道是新后端，同时在 `src/fetch/channels/registry.ts` 登记。
+4. 插件入口导出命名 `fetch`，由 `asg extensions install` 安装到
+   `data/extensions/<id>/`；网关启动时自动加载。
 5. 补测试：URL 匹配、`enabled` 禁用后 `find` 回退、结果字段与错误码。
 
 注册表会在构造时检查重复 `id`，重复直接 `throw`，避免静默覆盖。
 
 ## 外部插件
 
-`FetchPlugin` 与 `src/fetch/channels/` 目前只是**稳定契约**：第三方可以按这些接口
-实现平台与通道，并单独测试。运行时的外部插件加载（目录约定、版本校验、沙箱/权限）
-留到后续步骤，当前只有内置插件会被注册。
+`FetchPlugin` 与 `src/fetch/channels/` 是稳定契约。运行时加载由
+`src/extensions/loader.ts` 负责：扫描 `data/extensions/<id>/`，按
+`asg-plugin.json` 的 `provides` 读取命名导出 `fetch` / `engine`，再注入
+fetch 注册表与 gateway engine overlay。安装、校验与发布流程见 `docs/extensions.md`。
+
+插件与网关同进程运行，没有沙箱；只安装可信来源。

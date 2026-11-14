@@ -323,7 +323,8 @@ asg plugins remove <name>
 
 - `<name>` 接受旧安装名（`bili` / `ytdlp` / `opencli` / `article`）、规范通道 ID
   （`bilibili:kukemc` / `bilibili:ytdlp` / `bilibili:article` / `weibo:opencli`）
-  以及通道别名；`cnki:http` 是内置平台，不是可安装插件；
+  以及通道别名；`cnki:http` 是通道 ID，CNKI 取件插件使用
+  `asg extensions install djasdh/agent-search-gateway-plugin-cnki` 安装；
 - `install` / `remove` 以子进程调用 `scripts/backends/cli.mjs <name> <action> --root <ROOT> --json`；
 - 由安装器自己改 `gateway.yaml`、写 `data/backends/<name>/`；
 - 成功 → 整栈重启；失败 → 不自动回滚，报告 `previous.json` 路径；
@@ -359,9 +360,9 @@ asg extensions remove <id>
 - 插件在 `asg-plugin.json` 里自行声明 `provides`：`search` / `fetch` / 两者；
 - 安装包为单文件 ESM：Release 资产包含 `asg-plugin.json`、`entry` 指向的文件与 `SHA256SUMS`；
 - 安装目录 `<ROOT>/data/extensions/<id>/`，目录存在即视为已安装；`remove` 只删该目录；
-- 内置 id `bilibili` / `weibo` / `cnki` 不允许安装或卸载；
-- **当前只完成安装**：不 import 插件代码、不重启整栈；运行时加载在后续版本接入；
-- 详细 manifest 与发布流程见 `docs/extensions.md`。
+- 官方 id（`bilibili` / `weibo` / `cnki`）与普通第三方 id 一样安装/卸载；
+- 安装/卸载后需要重启网关（`asg restart`）或下次运行 `asg engines` 时生效；不会自动重启；
+- 运行时加载见 `docs/extensions.md`。
 
 ### 5.7 浏览器
 

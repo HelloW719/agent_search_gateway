@@ -14,8 +14,8 @@
 - 卸载只删除 `data/extensions/<id>`，不修改 `gateway.yaml` / `secrets.yaml`。
 - `asg extensions list` 遇到损坏的安装目录时只把该条标记为错误（JSON 里有 `error` 字段），不会让整条命令失败。
 
-`bilibili`、`weibo`、`cnki` 是官方插件 id：内置实现已迁出，允许作为第三方扩展安装与卸载；
-运行期外部插件与内置实现同 id 时，以外部插件为准。
+`bilibili`、`weibo`、`cnki` 是官方插件 id：核心不再内置对应实现，需通过
+`asg extensions install` 安装官方插件仓库；安装后由扩展机制加载。
 
 ## 2. manifest：`asg-plugin.json`
 
@@ -138,7 +138,7 @@ export GITHUB_TOKEN=ghp_xxx
 
 - manifest 的 `id` 与 `entry` 都做了路径约束，安装目录不会逃出 `data/extensions/`。
 - 只接受 https 资产地址，并用 `SHA256SUMS` 校验 manifest 与 entry。
-- 官方 id（`bilibili` / `weibo` / `cnki`）允许安装；同一 id 的外部插件在运行期覆盖内置实现。
+- 官方 id（`bilibili` / `weibo` / `cnki`）与普通第三方 id 一样安装/卸载。
 - 插件代码在网关进程内 import，**没有沙箱**；只安装可信来源。
 - **不读写**网关配置与密钥：插件通过自己的配置/环境变量获取凭据。
 
@@ -152,7 +152,7 @@ export GITHUB_TOKEN=ghp_xxx
 3. 按 `provides` 读取命名导出：
    - `fetch`：抓取插件对象（`match` / `enabled` / `available` / `fetch`），manifest 覆盖 `id` / `name` / `displayName` / `platform`；
    - `engine`：搜索源对象（`id` / `group` / `name` / `runtime` 等）。
-4. 同一批外部插件内 id 重复视为扩展自身错误；与内置同 id 时外部覆盖内置。
+4. 同一批外部插件内 id 重复视为扩展自身错误；重复插件会被跳过并记录错误。
 5. 单个插件加载失败只影响该插件，不影响网关启动与其它插件。
 
 插件不得 import 网关内部模块，也不得依赖宿主 `node_modules` 中的非内置包；

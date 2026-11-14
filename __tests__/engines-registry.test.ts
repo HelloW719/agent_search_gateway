@@ -10,7 +10,6 @@ import type { EngineProvider, EngineProviderContext } from "../src/engines/provi
 import { tracemoeProvider } from "../src/engines/providers/tracemoe.js";
 import { saucenaoProvider } from "../src/engines/providers/saucenao.js";
 import { baiduProvider } from "../src/engines/providers/baidu.js";
-import { weiboProvider } from "../src/engines/providers/weibo.js";
 import { GATEWAY_SOURCE_SPECS } from "../src/settings/gateway-sources.js";
 
 function ctx(
@@ -57,51 +56,13 @@ describe("引擎 provider 注册表", () => {
     expect(providersForGroup("gateway.reverse_image")).toHaveLength(GATEWAY_SOURCE_SPECS.length);
   });
 
-  it("微博 provider 已注册", () => {
-    expect(engineProvider("gateway.search", "weibo")).toBe(weiboProvider);
-    expect(weiboProvider.id).toBe("gateway.search:weibo");
-    expect(weiboProvider.enabledPath).toEqual(["search", "weibo", "enabled"]);
+  it("核心不再内置 gateway.search 文本源", () => {
+    expect(providersForGroup("gateway.search")).toEqual([]);
+    expect(engineProvider("gateway.search", "weibo")).toBeUndefined();
   });
 });
 
 describe("provider 元数据", () => {
-  it("微博 routing 读取自定义 category / hot_category", () => {
-    const providerCtx = ctx({
-      search: { weibo: { category: "wb", hot_category: "wb_hot" } },
-    });
-    expect(weiboProvider.routing(providerCtx)).toEqual(["category:wb", "category:wb_hot"]);
-  });
-
-  it("微博 routing 缺省 weibo / weibo_hot", () => {
-    expect(weiboProvider.routing(ctx())).toEqual(["category:weibo", "category:weibo_hot"]);
-  });
-
-  it("微博 available 只看前置条件，enabled 看 search.weibo.enabled", () => {
-    const off = ctx({ weibo: { enabled: true }, search: { weibo: { enabled: false } } });
-    expect(weiboProvider.available(off)).toBe(true);
-    expect(weiboProvider.enabled?.(off)).toBe(false);
-
-    const on = ctx({ weibo: { enabled: true }, search: { weibo: { enabled: true } } });
-    expect(weiboProvider.available(on)).toBe(true);
-    expect(weiboProvider.enabled?.(on)).toBe(true);
-
-    expect(weiboProvider.available(ctx())).toBe(false);
-    expect(
-      weiboProvider.available(ctx({ weibo: { enabled: false }, search: { weibo: { enabled: true } } })),
-    ).toBe(false);
-  });
-
-  it("微博 available：command 缺省 opencli 可用，显式空串不可用", () => {
-    const base = { weibo: { enabled: true }, search: { weibo: { enabled: true } } };
-    expect(weiboProvider.available(ctx(base))).toBe(true);
-    expect(weiboProvider.available(ctx({ ...base, weibo: { enabled: true, cli: { command: "opencli" } } }))).toBe(
-      true,
-    );
-    expect(weiboProvider.available(ctx({ ...base, weibo: { enabled: true, cli: { command: "  " } } }))).toBe(
-      false,
-    );
-  });
-
   it("百度 available：缺省 true，baidu.enabled=false 时 false", () => {
     expect(baiduProvider.available(ctx({ search: { reverse_image: {} } }))).toBe(true);
     expect(
@@ -131,43 +92,32 @@ describe("provider 元数据", () => {
     ).toBe(true);
   });
 
-  it("反向图搜 provider 的 runtime kind 正确，微博为 search", () => {
+  it("反向图搜 provider 的 runtime kind 正确", () => {
     for (const name of ["tracemoe", "saucenao", "baidu"]) {
       expect(engineProvider("gateway.reverse_image", name)!.runtime!.kind).toBe("reverse_image");
     }
-    expect(weiboProvider.runtime!.kind).toBe("search");
-  });
-
-  it("微博 plan：热搜优先、普通类别命中", () => {
-    const providerCtx = ctx({
-      search: { weibo: { category: "weibo", hot_category: "weibo_hot" } },
-    });
-    const runtime = weiboProvider.runtime;
-    if (!runtime || runtime.kind !== "search") throw new Error("weibo runtime 必须是 search");
-    expect(runtime.plan("weibo_hot", providerCtx)).toEqual({ hot: true });
-    expect(runtime.plan("weibo", providerCtx)).toEqual({ hot: false });
-    expect(runtime.plan("weibo,weibo_hot", providerCtx)).toEqual({ hot: true });
-    expect(runtime.plan("general", providerCtx)).toBeUndefined();
-    expect(runtime.plan(undefined, providerCtx)).toBeUndefined();
   });
 });
 
 describe("外部引擎 provider overlay", () => {
   it("外部同 id 覆盖内置，ENGINE_PROVIDERS 本身不变", () => {
     const external = fakeProvider({
-      id: "gateway.search:weibo",
-      name: "weibo",
-      displayName: "外部微博",
+      id: "gateway.reverse_image:baidu",
+      group: "gateway.reverse_image",
+      name: "baidu",
+      kind: "gateway",
+      displayName: "外部百度",
+      runtime: { kind: "reverse_image", search: async () => ({ ok: false, error: { kind: "api", message: "stub" } }) },
     });
 
     setExternalEngineProviders([external]);
 
-    expect(engineProvider("gateway.search", "weibo")).toBe(external);
-    const group = providersForGroup("gateway.search");
+    expect(engineProvider("gateway.reverse_image", "baidu")).toBe(external);
+    const group = providersForGroup("gateway.reverse_image");
     expect(group).toContain(external);
-    expect(group.filter((provider) => provider.id === "gateway.search:weibo")).toHaveLength(1);
-    expect(ENGINE_PROVIDERS.find((provider) => provider.id === "gateway.search:weibo")).toBe(
-      weiboProvider,
+    expect(group.filter((provider) => provider.id === "gateway.reverse_image:baidu")).toHaveLength(1);
+    expect(ENGINE_PROVIDERS.find((provider) => provider.id === "gateway.reverse_image:baidu")).toBe(
+      baiduProvider,
     );
   });
 
@@ -195,6 +145,6 @@ describe("外部引擎 provider overlay", () => {
 
     resetExternalEngineProvidersForTests();
     expect(engineProvider("gateway.search", "demo")).toBeUndefined();
-    expect(engineProvider("gateway.search", "weibo")).toBe(weiboProvider);
+    expect(engineProvider("gateway.search", "weibo")).toBeUndefined();
   });
 });

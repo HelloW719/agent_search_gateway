@@ -86,58 +86,14 @@ describe("FetchPluginRegistry", () => {
     expect(registry.find(new URL("https://example.com/"), ctx())?.id).toBe("ok");
   });
 
-  it("禁用 Bilibili / 微博后 find 返回 undefined", () => {
-    const disabled = ctx({ bilibili: { enabled: false }, weibo: { enabled: false } });
-    expect(fetchPluginRegistry.find(new URL("https://www.bilibili.com/video/BV1xx411c7mD"), disabled)).toBeUndefined();
-    expect(fetchPluginRegistry.find(new URL("https://weibo.com/1/AbC?weibo=post"), disabled)).toBeUndefined();
-    expect(fetchPluginRegistry.find(new URL("https://wx1.sinaimg.cn/large/a.jpg"), disabled)).toBeUndefined();
-
-    const enabled = ctx();
-    expect(fetchPluginRegistry.find(new URL("https://www.bilibili.com/video/BV1xx411c7mD"), enabled)?.id).toBe(
-      "bilibili",
-    );
-    expect(fetchPluginRegistry.find(new URL("https://weibo.com/1/AbC?weibo=post"), enabled)?.id).toBe("weibo");
-  });
-
-  it("内置插件元数据一致（id/platform/capabilities/requires）", () => {
-    expect(registeredPlugins()).toEqual(["cnki", "bilibili", "weibo"]);
-    const plugins = fetchPluginRegistry.list();
-    expect(plugins.map((p) => p.id)).toEqual(["cnki", "bilibili", "weibo"]);
-    for (const plugin of plugins) {
-      expect(plugin.platform).toBe(plugin.id);
-      expect(plugin.name).toBe(plugin.id);
-      expect(plugin.displayName.length).toBeGreaterThan(0);
-      expect(Array.isArray(plugin.capabilities)).toBe(true);
-      expect(plugin.requires === undefined || Array.isArray(plugin.requires)).toBe(true);
-    }
-
-    const bilibili = plugins.find((p) => p.id === "bilibili")!;
-    expect(bilibili.displayName).toBe("Bilibili");
-    expect(bilibili.aliases).toContain("bili");
-    expect(bilibili.settingsKey).toBe("bilibili");
-    expect(bilibili.capabilities).toEqual(["video", "article", "comments"]);
-    expect(bilibili.requires).toEqual([
-      { type: "backend", anyOf: ["bilibili:kukemc", "bilibili:ytdlp", "bilibili:article"] },
-      { type: "secret", path: "secrets.bilibili.http.token", optional: true },
-    ]);
-
-    const weibo = plugins.find((p) => p.id === "weibo")!;
-    expect(weibo.displayName).toBe("微博");
-    expect(weibo.capabilities).toEqual(["post", "comments", "user", "user-posts", "image"]);
-    expect(weibo.requires).toEqual([
-      { type: "command", path: "weibo.cli.command", default: "opencli" },
-      { type: "backend", anyOf: ["weibo:opencli"] },
-    ]);
-
-    const cnki = plugins.find((p) => p.id === "cnki")!;
-    expect(cnki.displayName).toBe("知网");
-    expect(cnki.capabilities).toEqual(["pdf"]);
-    expect(cnki.requires).toEqual([]);
+  it("核心不再内置平台插件", () => {
+    expect(registeredPlugins()).toEqual([]);
+    expect(fetchPluginRegistry.list()).toEqual([]);
   });
 });
 
 describe("createFetchRegistry 外部插件合并", () => {
-  it("外部同 id 覆盖内置，其余保持内置顺序", () => {
+  it("外部插件按加载顺序注册", () => {
     const external = fakePlugin("weibo", () => true, {
       displayName: "外部微博",
       capabilities: ["post"],
@@ -145,30 +101,24 @@ describe("createFetchRegistry 外部插件合并", () => {
 
     const registry = createFetchRegistry([external]);
 
-    expect(registry.list().map((plugin) => plugin.id)).toEqual(["cnki", "bilibili", "weibo"]);
-    const weibo = registry.list().find((plugin) => plugin.id === "weibo")!;
-    expect(weibo).toBe(external);
-    expect(weibo.displayName).toBe("外部微博");
+    expect(registry.list().map((plugin) => plugin.id)).toEqual(["weibo"]);
+    expect(registry.list()[0]).toBe(external);
     expect(registry.find(new URL("https://example.com/"), ctx())).toBe(external);
   });
 
-  it("外部新增 id 追加在内置之后", () => {
-    const external = fakePlugin("demo", () => true);
-    const registry = createFetchRegistry([external]);
+  it("多个外部插件保持加载顺序", () => {
+    const first = fakePlugin("demo", () => true);
+    const second = fakePlugin("another", () => true);
+    const registry = createFetchRegistry([first, second]);
 
-    expect(registry.list().map((plugin) => plugin.id)).toEqual([
-      "cnki",
-      "bilibili",
-      "weibo",
-      "demo",
-    ]);
+    expect(registry.list().map((plugin) => plugin.id)).toEqual(["demo", "another"]);
     expect(registry.find(new URL("https://example.com/"), ctx())?.id).toBe("demo");
   });
 
-  it("没有外部插件时等价于内置注册表", () => {
+  it("没有外部插件时注册表为空", () => {
     const registry = createFetchRegistry([]);
-    expect(registry.list().map((plugin) => plugin.id)).toEqual(registeredPlugins());
-    expect(registry.list()).toEqual(fetchPluginRegistry.list());
+    expect(registry.list()).toEqual([]);
+    expect(registry.find(new URL("https://example.com/"), ctx())).toBeUndefined();
   });
 
   it("外部插件自身 id 重复时构造抛错", () => {

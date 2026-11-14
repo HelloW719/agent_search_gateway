@@ -1,8 +1,9 @@
 /**
  * 网关原生引擎注册表：编译期静态注册 + 运行期外部 overlay。
  *
- * 新增引擎 = 新建 `providers/<name>.ts` + 在这里加一行；CLI 与运行期都从这里取。
- * 第三方扩展（`data/extensions`）加载后通过 `setExternalEngineProviders` 覆盖同 id 内置项。
+ * 新增内置引擎 = 新建 `providers/<name>.ts` + 在这里加一行；CLI 与运行期都从这里取。
+ * 第三方扩展（`data/extensions`）加载后通过 `setExternalEngineProviders` 合并；
+ * 同 id 的外部 provider 覆盖内置项。
  */
 
 import type { EngineProvider } from "./provider.js";
@@ -10,13 +11,11 @@ import type { EngineGroup } from "./types.js";
 import { tracemoeProvider } from "./providers/tracemoe.js";
 import { saucenaoProvider } from "./providers/saucenao.js";
 import { baiduProvider } from "./providers/baidu.js";
-import { weiboProvider } from "./providers/weibo.js";
 
 export const ENGINE_PROVIDERS: readonly EngineProvider[] = [
   tracemoeProvider,
   saucenaoProvider,
   baiduProvider,
-  weiboProvider,
 ];
 
 // 内置 provider 的 id 是编程契约；重复说明注册表写错了，直接 fail fast。

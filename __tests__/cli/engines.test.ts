@@ -62,20 +62,6 @@ function gatewayConfig(searxngUrl: string, extra: string[] = []): string {
   ].join("\n");
 }
 
-function gatewayConfigWith(options: {
-  searxngUrl?: string;
-  topWeibo?: boolean;
-  searchWeibo?: boolean;
-}): string {
-  const extra: string[] = [];
-  if (options.searchWeibo !== undefined) {
-    extra.push("  weibo:", `    enabled: ${options.searchWeibo}`);
-  }
-  const config = gatewayConfig(options.searxngUrl ?? "http://127.0.0.1:1", extra);
-  if (options.topWeibo === undefined) return config;
-  return ["weibo:", `  enabled: ${options.topWeibo}`, config].join("\n");
-}
-
 function makeRoot(options: { searxngUrl?: string; saucenaoKey?: string; config?: string } = {}): string {
   const root = tempRoot();
   write(path.join(root, "gateway.yaml"), options.config ?? gatewayConfig(options.searxngUrl ?? "http://127.0.0.1:1"));
@@ -189,7 +175,7 @@ describe("engines list（本地视图）", () => {
     expect(engines.every((engine) => engine.source === undefined)).toBe(true);
   });
 
-  it("每条记录都有 id / group，且包含 gateway.search:weibo", () => {
+  it("每条记录都有 id / group，且核心不再内置 gateway.search", () => {
     const root = makeRoot();
     const engines = readLocalEngines(root);
     const byId = new Map(engines.map((engine) => [engine.id, engine]));
@@ -200,30 +186,7 @@ describe("engines list（本地视图）", () => {
       name: "baidu",
       group: "gateway.reverse_image",
     });
-    expect(byId.get("gateway.search:weibo")).toMatchObject({
-      name: "weibo",
-      group: "gateway.search",
-      kind: "gateway",
-      enabled: false,
-      available: false,
-      routing: ["category:weibo", "category:weibo_hot"],
-      requires: ["config:weibo.enabled"],
-    });
-  });
-
-  it("微博类别可配置，顶层 weibo.enabled 决定 available", () => {
-    const root = makeRoot({
-      config: gatewayConfigWith({ topWeibo: true, searchWeibo: true }).replace(
-        "    enabled: true",
-        "    enabled: true\n    category: wb\n    hot_category: wb_hot",
-      ),
-    });
-    const weibo = readLocalEngines(root).find((engine) => engine.id === "gateway.search:weibo")!;
-    expect(weibo).toMatchObject({
-      enabled: true,
-      available: true,
-      routing: ["category:wb", "category:wb_hot"],
-    });
+    expect(byId.get("gateway.search:weibo")).toBeUndefined();
   });
 
   it("有 saucenao 密钥时 available=true", () => {
@@ -271,7 +234,7 @@ describe("engines list --all", () => {
     expect(result.data).toMatchObject({ scope: "all" });
   });
 
-  it("远端同名引擎不覆盖网关与微博记录", async () => {
+  it("远端同名引擎不覆盖网关记录", async () => {
     const url = await listenConfig({
       engines: [
         { name: "baidu", enabled: true },
@@ -284,10 +247,6 @@ describe("engines list --all", () => {
     const gatewayBaidu = engines.find((engine) => engine.id === "gateway.reverse_image:baidu")!;
     expect(gatewayBaidu).toMatchObject({ kind: "gateway", enabled: true });
     expect(gatewayBaidu.source).toBeUndefined();
-
-    const gatewayWeibo = engines.find((engine) => engine.id === "gateway.search:weibo")!;
-    expect(gatewayWeibo).toMatchObject({ kind: "gateway", enabled: false });
-    expect(gatewayWeibo.source).toBeUndefined();
 
     // 远端确实带了同名的 searxng 条目，两条记录同时存在
     expect(engines.find((engine) => engine.id === "searxng:baidu")).toMatchObject({
@@ -506,21 +465,6 @@ describe("限定名写入", () => {
     expect(hasBak(root, "gateway.yaml")).toBe(true);
     expect(restartCalls).toHaveLength(1);
   });
-
-  it("gateway.search:weibo 写入 search.weibo.enabled", async () => {
-    const root = makeRoot({ config: gatewayConfigWith({ topWeibo: true }) });
-
-    await enginesRun({ root, reporter, rest: ["enable", "gateway.search:weibo"] });
-
-    const config = parse(root, "gateway.yaml") as {
-      weibo: { enabled: boolean };
-      search: { weibo: { enabled: boolean } };
-    };
-    expect(config.search.weibo.enabled).toBe(true);
-    expect(config.weibo.enabled).toBe(true);
-    expect(hasBak(root, "gateway.yaml")).toBe(true);
-    expect(restartCalls).toEqual([root]);
-  });
 });
 
 describe("同名冲突", () => {
@@ -567,57 +511,6 @@ describe("同名冲突", () => {
   });
 });
 
-describe("微博引擎依赖", () => {
-  it("weibo.enabled=false 时启用报 MISSING_DEPENDENCY，且不写文件", async () => {
-    const root = makeRoot({ config: gatewayConfigWith({ topWeibo: false }) });
-    const configBefore = read(root, "gateway.yaml");
-    const settingsBefore = read(root, SETTINGS_PATH);
-
-    await expect(
-      enginesRun({ root, reporter, rest: ["enable", "gateway.search:weibo"] }),
-    ).rejects.toMatchObject({
-      code: "MISSING_DEPENDENCY",
-      exitCode: 4,
-      details: {
-        missing: [{ engine: "gateway.search:weibo", requires: ["config:weibo.enabled"] }],
-      },
-    });
-
-    expect(read(root, "gateway.yaml")).toBe(configBefore);
-    expect(read(root, SETTINGS_PATH)).toBe(settingsBefore);
-    expect(hasBak(root, "gateway.yaml")).toBe(false);
-    expect(restartCalls).toHaveLength(0);
-  });
-
-  it("weibo.enabled=true 时写入 search.weibo.enabled 并只重启一次", async () => {
-    const root = makeRoot({ config: gatewayConfigWith({ topWeibo: true }) });
-
-    await enginesRun({ root, reporter, rest: ["enable", "gateway.search:weibo"] });
-
-    const config = parse(root, "gateway.yaml") as {
-      search: { weibo: { enabled: boolean } };
-    };
-    expect(config.search.weibo.enabled).toBe(true);
-    expect(restartCalls).toEqual([root]);
-  });
-
-  it("禁用微博只改 search.weibo.enabled，不动顶层 weibo.enabled", async () => {
-    const root = makeRoot({
-      config: gatewayConfigWith({ topWeibo: true, searchWeibo: true }),
-    });
-
-    await enginesRun({ root, reporter, rest: ["disable", "gateway.search:weibo"] });
-
-    const config = parse(root, "gateway.yaml") as {
-      weibo: { enabled: boolean };
-      search: { weibo: { enabled: boolean } };
-    };
-    expect(config.search.weibo.enabled).toBe(false);
-    expect(config.weibo.enabled).toBe(true);
-    expect(restartCalls).toHaveLength(1);
-  });
-});
-
 describe("组合与失败处理", () => {
   it("searxng + gateway 同时变化时写两个文件，只重启一次", async () => {
     const root = makeRoot();
@@ -656,7 +549,7 @@ describe("组合与失败处理", () => {
       enginesRun({
         root,
         reporter,
-        rest: ["disable", "searxng:bilibili", "gateway.search:weibo"],
+        rest: ["disable", "searxng:bilibili", "gateway.reverse_image:tracemoe"],
       }),
     ).rejects.toMatchObject({ code: "CONFIG_INVALID", exitCode: 4 });
 

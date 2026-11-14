@@ -2,6 +2,29 @@
 
 本项目遵循语义化版本，条目按版本倒序。
 
+## [0.3.4] - 2026-11-15
+
+### Breaking
+
+- **不再支持 Docker 部署**：删除 `docker/`、`Dockerfile`、`.dockerignore` 与 docker 镜像 workflow；安装器只接受 `--searxng-mode auto | native | external`。
+- `bilibili` / `weibo` / `cnki` 三个内置抓取插件迁出核心，改由官方插件仓库安装；核心不再内置对应实现。
+
+### Added
+
+- 第三方扩展运行时加载：扫描 `data/extensions/<id>/`，按 `asg-plugin.json` 的 `provides` 读取命名导出 `fetch` / `engine`。
+- fetch 注册表与 gateway engine 注册表支持外部插件注入；同 id 外部实现优先。
+- 新增官方插件仓库与 `asg extensions install` 安装流程（单文件 ESM + SHA256SUMS）。
+- 新增插件编写 skill，方便把插件开发交给 AI。
+
+### Changed
+
+- `asg engines list/enable/disable` 会先加载已安装的 search 插件。
+- 原生 searxng 的 settings 模板与 quota 种子迁移到 `searxng-ext/`。
+
+### Fixed
+
+- 移除 `bilibili` / `weibo` / `cnki` 作为扩展 id 的安装拦截，官方插件可正常安装与卸载。
+
 ## [0.3.3] - 2026-11-15
 
 ### Added
