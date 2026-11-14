@@ -76,7 +76,7 @@ function freePort() {
  *
  * 自检失败时返回 enabled=false，让安装器关闭该能力而不是让整栈无法启动。
  */
-async function smokeTest(binary, cwd, timeoutMs = 30_000) {
+async function smokeTest(binary, cwd, timeoutMs = 60_000) {
   let port;
   try {
     port = await freePort();
@@ -153,6 +153,42 @@ async function smokeTest(binary, cwd, timeoutMs = 30_000) {
   return { healthy: false, detail };
 }
 
+/** PyInstaller 自带的 libreadline 会通过 LD_LIBRARY_PATH 影响子进程 /bin/sh。 */
+export function isReadlineConflict(detail) {
+  return /rl_trim_arg_from_keyseq|symbol lookup error:.*readline|readline.*symbol lookup error/i.test(
+    String(detail || ''),
+  );
+}
+
+/**
+ * 禁用 PyInstaller 包内自带的 libreadline。
+ *
+ * FlareSolverr 启动时会把 `_internal` 放进 LD_LIBRARY_PATH；它再 spawn
+ * `/bin/sh` 时，Arch 的 bash 会加载这个自带 libreadline，而该库缺少
+ * `rl_trim_arg_from_keyseq`，于是报 symbol lookup error。
+ * 服务端模式不需要 readline；移除后 /bin/sh 会使用系统库。
+ */
+export async function disableBundledReadline(binaryDir) {
+  const internal = path.join(binaryDir, '_internal');
+  let entries;
+  try {
+    entries = await fs.readdir(internal);
+  } catch {
+    return [];
+  }
+
+  const renamed = [];
+  for (const name of entries) {
+    if (!/^libreadline\.so(?:\.\d+(?:\.\d+)*)?$/.test(name)) continue;
+    const from = path.join(internal, name);
+    const to = `${from}.disabled`;
+    if (await exists(to)) continue;
+    await fs.rename(from, to);
+    renamed.push(to);
+  }
+  return renamed;
+}
+
 export function flaresolverrAsset(pins, platform) {
   const asset = pins?.flaresolverr?.assets?.[platform];
   if (!asset) return null;
@@ -202,7 +238,19 @@ export async function installFlareSolverr({ root, platform, pins, logger, port =
 
   if (options?.smokeTest !== false) {
     logger?.('FlareSolverr 启动自检 ...');
-    const smoke = await smokeTest(binary, path.dirname(binary));
+    let smoke = await smokeTest(binary, path.dirname(binary));
+    if (!smoke.healthy && isReadlineConflict(smoke.detail)) {
+      const moved = await disableBundledReadline(path.dirname(binary));
+      if (moved.length > 0) {
+        logger?.(
+          `检测到内置 libreadline 与系统 /bin/sh 冲突，已禁用：${moved
+            .map((file) => path.basename(file))
+            .join(', ')}`,
+        );
+        // 首次启动 undetected_chromedriver 可能还要下载/初始化，给第二次自检更长时间。
+        smoke = await smokeTest(binary, path.dirname(binary), 90_000);
+      }
+    }
     if (!smoke.healthy) {
       logger?.(`FlareSolverr 自检失败，已关闭该能力：${smoke.detail}`);
       return {

@@ -4,6 +4,11 @@ import { prepareConfig } from "../../scripts/install/config.mjs";
 import { parseArgs, platformTag } from "../../scripts/install/cli.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import { proxyEnvName, sha256File, verifySha256 } from "../../scripts/install/http.mjs";
+// @ts-expect-error 纯 JS 安装脚本没有类型声明
+import {
+  disableBundledReadline,
+  isReadlineConflict,
+} from "../../scripts/install/flaresolverr.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -134,6 +139,34 @@ describe("下载校验", () => {
         else process.env[k] = backup[k];
       }
     }
+  });
+});
+
+describe("FlareSolverr 自带 readline 冲突", () => {
+  it("识别 /bin/sh 的 symbol lookup error", () => {
+    expect(
+      isReadlineConflict(
+        "/bin/sh: symbol lookup error: /bin/sh: undefined symbol: rl_trim_arg_from_keyseq",
+      ),
+    ).toBe(true);
+    expect(isReadlineConflict("启动后 30 秒内未通过健康检查")).toBe(false);
+  });
+
+  it("只禁用 libreadline，保留其它自带库，且幂等", async () => {
+    const dir = tmp();
+    const internal = join(dir, "_internal");
+    mkdirSync(internal, { recursive: true });
+    writeFileSync(join(internal, "libreadline.so.8"), "rl");
+    writeFileSync(join(internal, "libreadline.so.8.3"), "rl");
+    writeFileSync(join(internal, "libtinfo.so.6"), "ti");
+
+    const moved = await disableBundledReadline(dir);
+    expect(moved).toHaveLength(2);
+    expect(existsSync(join(internal, "libreadline.so.8.disabled"))).toBe(true);
+    expect(existsSync(join(internal, "libreadline.so.8.3.disabled"))).toBe(true);
+    expect(existsSync(join(internal, "libtinfo.so.6"))).toBe(true);
+
+    await expect(disableBundledReadline(dir)).resolves.toEqual([]);
   });
 });
 
