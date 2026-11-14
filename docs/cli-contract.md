@@ -1,6 +1,6 @@
 # asg CLI 契约
 
-- 状态：已实现（0.3.2）
+- 状态：已实现（0.3.3）
 - 目标版本：0.3.0
 - 适用范围：安装完成后的运行期管理
 - 相关：ADR-0018（CLI 控制面）、ADR-0019（GUI 只调 CLI）
@@ -346,6 +346,22 @@ asg plugins remove <name>
   ]
 }
 ```
+
+### 5.6.1 第三方扩展
+
+```text
+asg extensions search [query] [--limit N]
+asg extensions install <owner/repo>[@version]
+asg extensions list
+asg extensions remove <id>
+```
+
+- 插件在 `asg-plugin.json` 里自行声明 `provides`：`search` / `fetch` / 两者；
+- 安装包为单文件 ESM：Release 资产包含 `asg-plugin.json`、`entry` 指向的文件与 `SHA256SUMS`；
+- 安装目录 `<ROOT>/data/extensions/<id>/`，目录存在即视为已安装；`remove` 只删该目录；
+- 内置 id `bilibili` / `weibo` / `cnki` 不允许安装或卸载；
+- **当前只完成安装**：不 import 插件代码、不重启整栈；运行时加载在后续版本接入；
+- 详细 manifest 与发布流程见 `docs/extensions.md`。
 
 ### 5.7 浏览器
 

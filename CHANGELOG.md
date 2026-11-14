@@ -2,6 +2,21 @@
 
 本项目遵循语义化版本，条目按版本倒序。
 
+## [0.3.3] - 2026-11-15
+
+### Added
+
+- 第三方插件声明与安装薄层：`asg-plugin.json` 约定 `provides`（`search` / `fetch` / 两者），新增 `asg extensions search|install|list|remove`。
+- 安装器从 GitHub Release 下载 `asg-plugin.json`、单文件 ESM `entry` 与 `SHA256SUMS`，校验后原子写入 `data/extensions/<id>/`；内置 id（`bilibili` / `weibo` / `cnki`）拒绝覆盖。
+- 新增 `docs/extensions.md` 与 `examples/asg-plugin/` 模板（单文件 esbuild + `v*` tag 发布 workflow）。
+- 当前只完成安装，网关不 import 插件、不重启整栈；运行时加载留到后续版本。
+
+### Fixed
+
+- 修复 Arch 下 FlareSolverr 自带 `libreadline` 与系统 `/bin/sh` 冲突：自检命中后禁用内置 readline 并重试。
+- 服务管理器按安装根匹配：同名 systemd / launchd / schtasks 项属于其他安装根时回退 pid，安装器也不再覆盖其他 root 的自启项。
+- 服务端测试固定 searxng 不可达端口，避免本机已有 searxng 时误判。
+
 ## [0.3.2] - 2026-11-14
 
 ### Added
