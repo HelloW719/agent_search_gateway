@@ -233,7 +233,19 @@ async function resolveRelease(
   request: RequestOptions,
 ): Promise<ReleaseInfo> {
   const base = `https://api.github.com/repos/${repo}/releases`;
-  if (!version) return fetchRelease(`${base}/latest`, deps, request);
+  if (!version) {
+    try {
+      return await fetchRelease(`${base}/latest`, deps, request);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      // 底层下载层会把 404 也提示成“检查代理”，这里换成明确的“没有 Release”。
+      throw new CliError(
+        "PLUGIN_FAILED",
+        EXIT.FAIL,
+        `仓库 ${repo} 没有可用的 Release。\n处理：确认 owner/repo 正确，且该仓库已发布 Release。`,
+      );
+    }
+  }
 
   const withV = `${base}/tags/v${version}`;
   const withoutV = `${base}/tags/${version}`;
@@ -242,7 +254,17 @@ async function resolveRelease(
   } catch (first) {
     // 只有 404 才回退到不带 v 的 tag；其它网络/限流错误直接上报。
     if (!isNotFound(first)) throw first;
-    return fetchRelease(withoutV, deps, request);
+  }
+
+  try {
+    return await fetchRelease(withoutV, deps, request);
+  } catch (second) {
+    if (!isNotFound(second)) throw second;
+    throw new CliError(
+      "PLUGIN_FAILED",
+      EXIT.FAIL,
+      `未找到 ${repo} 的 Release ${version}（已尝试 tag v${version} 与 ${version}）。\n处理：确认版本号；或省略版本号安装最新版本：asg extensions install ${repo}`,
+    );
   }
 }
 

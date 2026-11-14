@@ -181,6 +181,38 @@ describe("安装扩展", () => {
     expect(fetchJson).toHaveBeenCalledTimes(1);
   });
 
+  it("两个 tag 都 404 时给出“未找到 Release 版本”而不是代理提示", async () => {
+    const root = tempRoot();
+    const fetchJson = vi.fn(async () => {
+      throw new Error("下载失败: HTTP 404\n已检测到代理变量 HTTPS_PROXY，请检查代理是否可用。");
+    });
+    const deps = fakeDeps({ fetchJson });
+
+    await expect(
+      installExtension({ root, repo: "owner/demo", version: "9.9.9", deps }),
+    ).rejects.toMatchObject({
+      code: "PLUGIN_FAILED",
+      message: expect.stringContaining("未找到 owner/demo 的 Release 9.9.9"),
+    });
+    await expect(
+      installExtension({ root, repo: "owner/demo", version: "9.9.9", deps }),
+    ).rejects.not.toMatchObject({ message: expect.stringContaining("代理") });
+    expect(fs.existsSync(extensionsPath(root))).toBe(false);
+  });
+
+  it("latest 404 时提示仓库没有 Release", async () => {
+    const root = tempRoot();
+    const fetchJson = vi.fn(async () => {
+      throw new Error("下载失败: HTTP 404");
+    });
+    const deps = fakeDeps({ fetchJson });
+
+    await expect(installExtension({ root, repo: "owner/demo", deps })).rejects.toMatchObject({
+      code: "PLUGIN_FAILED",
+      message: expect.stringContaining("没有可用的 Release"),
+    });
+  });
+
   it("重复安装会原子替换旧目录，不残留 staging/trash", async () => {
     const root = tempRoot();
     const first = await installExtension({ root, repo: "owner/demo", deps: fakeDeps() });
