@@ -64,7 +64,7 @@ jobs:
           STAGE="release/${NAME}"
           mkdir -p "$STAGE"
           cp -r dist node_modules bin package.json package-lock.json \
-            gateway.yaml.example secrets.yaml.example scripts runtime \
+            gateway.yaml.example secrets.yaml.example scripts runtime skills \
             README.md LICENSE THIRD_PARTY_LICENSES.md "$STAGE/"
           # 原生 searxng 安装所需资源（settings 模板 + quota 种子配置）
           mkdir -p "$STAGE/searxng-ext/searx/engines" "$STAGE/searxng-ext/searx/plugins"

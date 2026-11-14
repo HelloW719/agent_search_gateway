@@ -286,7 +286,7 @@ asg restart
 - 安装位置：`data/extensions/<id>/`；卸载用 `asg extensions remove <id>`。
 - 插件与网关同进程运行，没有沙箱；只安装可信来源。
 - 发现：GitHub topic `asg-plugin`；`asg extensions search` 只列仓库，安装仍需显式执行。
-- 详细契约见 [`docs/extensions.md`](docs/extensions.md)。
+- 详细契约见 [`docs/extensions.md`](docs/extensions.md)；插件开发可把 [`skills/asg-plugin-authoring/`](skills/asg-plugin-authoring/) 交给 AI 使用。
 
 ## 快速开始（源码）
 
