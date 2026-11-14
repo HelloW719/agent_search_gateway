@@ -27,6 +27,8 @@ const silentLogger: Logger = {
 function makeConfig(overrides: DeepPartial<Settings> = {}): Settings {
   const base: DeepPartial<Settings> = {
     gateway: { port: 0 },
+    // 测试不依赖本机 searxng：显式指向不可达端口，保证「搜索失败」分支稳定。
+    searxng: { url: "http://127.0.0.1:1" },
     fetch: {
       download_dir: DOWNLOAD_DIR,
       download_ttl_ms: 604800000,
