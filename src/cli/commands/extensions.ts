@@ -1,6 +1,7 @@
 /** `asg extensions search|install|list|remove`。
  *
- * 这一期只做插件声明与安装目录；安装完成后**不重启网关、不加载插件代码**。
+ * 只负责插件目录：安装/卸载后**不自动重启网关**；网关下次启动（或运行
+ * `asg engines`）时由 `src/extensions/loader.ts` 加载。
  */
 
 import { takeNumber } from "../args.js";
