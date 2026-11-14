@@ -139,8 +139,7 @@ export GITHUB_TOKEN=ghp_xxx
 - manifest 的 `id` 与 `entry` 都做了路径约束，安装目录不会逃出 `data/extensions/`。
 - 只接受 https 资产地址，并用 `SHA256SUMS` 校验 manifest 与 entry。
 - 官方 id（`bilibili` / `weibo` / `cnki`）与普通第三方 id 一样安装/卸载。
-- 插件代码在网关进程内 import，**没有沙箱**；只安装可信来源。
-- **不读写**网关配置与密钥：插件通过自己的配置/环境变量获取凭据。
+- 插件代码在网关进程内 import，**没有沙箱**；可读取宿主传入的 `ctx.settings` / `ctx.secrets` 与 `getSecret()`。只安装可信来源。
 
 ## 7. 运行时加载
 
