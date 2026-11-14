@@ -36,6 +36,10 @@ const manifestSchema = z
       .string()
       .min(1, "entry 不能为空")
       .refine((value) => isValidEntryName(value), "entry 只能是单个 .mjs / .js 文件名"),
+    platform: z
+      .string()
+      .regex(/^[a-z0-9-]+$/, "platform 只能是小写字母/数字/-")
+      .optional(),
     description: z.string().optional(),
   })
   .strict();

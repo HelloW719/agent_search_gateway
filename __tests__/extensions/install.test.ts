@@ -247,16 +247,15 @@ describe("安装扩展", () => {
     });
   });
 
-  it("拒绝内置 id", async () => {
+  it("允许安装官方 id（内置实现已迁出）", async () => {
     const manifestText = JSON.stringify({ ...MANIFEST, id: "bilibili" });
     const deps = fakeDeps({ manifestText });
     const root = tempRoot();
 
-    await expect(installExtension({ root, repo: "owner/demo", deps })).rejects.toMatchObject({
-      code: "PLUGIN_FAILED",
-      message: expect.stringContaining("内置"),
-    });
-    expect(fs.readdirSync(extensionsPath(root))).toEqual([]);
+    const result = await installExtension({ root, repo: "owner/demo", deps });
+
+    expect(result.id).toBe("bilibili");
+    expect(fs.readdirSync(extensionsPath(root))).toEqual(["bilibili"]);
   });
 
   it("非法 manifest 直接失败", async () => {
@@ -361,15 +360,19 @@ describe("列出与卸载扩展", () => {
     expect(fs.existsSync(path.join(extensionsPath(root), "demo-fetch"))).toBe(false);
   });
 
-  it("拒绝非法 id、内置 id 与不存在的目录", async () => {
+  it("允许卸载官方 id；非法 id 与不存在的目录仍拒绝", async () => {
     const root = tempRoot();
+    writeExtension(root, "bilibili", JSON.stringify({ ...MANIFEST, id: "bilibili" }));
+
+    await expect(removeExtension(root, "bilibili")).resolves.toEqual({
+      id: "bilibili",
+      removed: true,
+    });
+    expect(fs.existsSync(path.join(extensionsPath(root), "bilibili"))).toBe(false);
+
     await expect(removeExtension(root, "Bad")).rejects.toMatchObject({
       code: "PLUGIN_UNKNOWN",
       exitCode: 4,
-    });
-    await expect(removeExtension(root, "bilibili")).rejects.toMatchObject({
-      code: "PLUGIN_FAILED",
-      message: expect.stringContaining("内置"),
     });
     await expect(removeExtension(root, "nope")).rejects.toMatchObject({
       code: "PLUGIN_UNKNOWN",

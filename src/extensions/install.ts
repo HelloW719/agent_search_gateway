@@ -21,7 +21,7 @@ import {
   type ExtensionProvide,
 } from "./manifest.js";
 
-/** 网关内置能力，不允许被第三方扩展覆盖或卸载。 */
+/** 官方插件 id（内置实现已迁出，允许通过扩展机制安装/覆盖）。 */
 export const BUILTIN_EXTENSION_IDS = ["bilibili", "weibo", "cnki"] as const;
 
 const MANIFEST_FILE = "asg-plugin.json";
@@ -176,20 +176,9 @@ function normalizeVersionInput(value: string): string {
   return version;
 }
 
-function isBuiltinId(id: string): boolean {
-  return (BUILTIN_EXTENSION_IDS as readonly string[]).includes(id);
-}
-
 function assertInstallableId(id: string): void {
   if (!isValidExtensionId(id)) {
     throw new CliError("PLUGIN_FAILED", EXIT.INVALID, `插件 id 不合法：${id}`);
-  }
-  if (isBuiltinId(id)) {
-    throw new CliError(
-      "PLUGIN_FAILED",
-      EXIT.INVALID,
-      `${id} 是网关内置能力，不能作为第三方扩展安装`,
-    );
   }
 }
 
@@ -569,20 +558,13 @@ export function listExtensions(root: string): InstalledExtension[] {
   return items.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-/** 卸载第三方插件：只删 data/extensions/<id>，不触碰内置能力与网关配置。 */
+/** 卸载第三方插件：只删 data/extensions/<id>，不触碰网关配置。 */
 export async function removeExtension(
   root: string,
   id: string,
 ): Promise<{ id: string; removed: true }> {
   if (!isValidExtensionId(id)) {
     throw new CliError("PLUGIN_UNKNOWN", EXIT.INVALID, `插件 id 不合法：${id}`);
-  }
-  if (isBuiltinId(id)) {
-    throw new CliError(
-      "PLUGIN_FAILED",
-      EXIT.INVALID,
-      `${id} 是网关内置能力，不能作为第三方扩展卸载`,
-    );
   }
 
   const target = path.join(extensionsDir(root), id);

@@ -47,7 +47,7 @@ afterEach(() => {
 });
 
 describe("asg extensions install", () => {
-  it("解析 owner/repo@version 并提示当前只完成安装", async () => {
+  it("解析 owner/repo@version 并提示重启后生效", async () => {
     const events: Array<Record<string, unknown>> = [];
     const install = vi.fn(async () => ({
       id: "demo-fetch",
@@ -70,7 +70,7 @@ describe("asg extensions install", () => {
       version: "1.0.0",
       logger: expect.any(Function),
     });
-    expect(result.human).toContain("当前版本只完成安装；运行时加载将在后续版本接入。");
+    expect(result.human).toContain("重启网关后生效。");
     expect(result.human).toContain("demo-fetch");
     expect(result.data).toMatchObject({ id: "demo-fetch", provides: ["fetch"] });
 

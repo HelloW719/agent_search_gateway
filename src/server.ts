@@ -9,8 +9,13 @@ import { getSecretAtPath, ssrfOf, type GatewaySettings, type Secrets, type Setti
 import { fetchAdList, isAdListStale, startAdListScheduler } from "./filter/adlist.js";
 import { buildDomainFilter, type DomainFilter } from "./filter/domain-filter.js";
 import { createFlareSolverrClient, type FlareSolverrClient } from "./fetch/flaresolverr.js";
+import { createFetchRegistry } from "./fetch/plugins/index.js";
+import type { FetchPluginRegistry } from "./fetch/plugins/registry.js";
 import { createFetchService } from "./fetch/service.js";
 import { FetchStore } from "./fetch/store.js";
+import { loadExtensions } from "./extensions/loader.js";
+import type { EngineProvider } from "./engines/provider.js";
+import { setExternalEngineProviders } from "./engines/registry.js";
 import { getHealth } from "./health.js";
 import type { Logger } from "./logger.js";
 import { createSearchService } from "./search/service.js";
@@ -78,6 +83,44 @@ export function getFetchStore(settings: Settings, logger: Logger): FetchStore {
     logger.info(`fetch 产物目录: ${dir} (TTL ${Math.round(fetch.download_ttl_ms / 86400000)}d, 配额 ${Math.round(fetch.download_max_total_bytes / 1024 / 1024)}MB)`);
   }
   return sharedFetchStore;
+}
+
+// ---- 第三方扩展：进程级单例 ----
+// `createServer` 每个 MCP 会话都会调用；缓存 Promise 避免重复 import 同一插件文件。
+interface SharedExtensions {
+  registry: FetchPluginRegistry;
+  engines: EngineProvider[];
+}
+
+let sharedExtensions: Promise<SharedExtensions> | null = null;
+
+function getExtensions(
+  _settings: Settings,
+  _secrets: Secrets,
+  logger: Logger,
+): Promise<SharedExtensions> {
+  if (!sharedExtensions) {
+    sharedExtensions = loadExtensions(process.cwd(), { logger })
+      .then((loaded) => {
+        for (const error of loaded.errors) {
+          logger.warn(`扩展 ${error.id} 加载失败：${error.error}`);
+        }
+        setExternalEngineProviders(loaded.engines);
+        logger.info(
+          `第三方扩展已加载：fetch ${loaded.fetch.length} 个，engine ${loaded.engines.length} 个`,
+        );
+        return { registry: createFetchRegistry(loaded.fetch), engines: loaded.engines };
+      })
+      .catch((err) => {
+        // 加载器本身异常（非单个插件问题）时回退内置实现，不让网关启动失败。
+        sharedExtensions = null;
+        logger.warn(
+          `第三方扩展加载失败，继续使用内置实现：${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { registry: createFetchRegistry([]), engines: [] };
+      });
+  }
+  return sharedExtensions;
 }
 
 // ---- 广告过滤器 / adlist 调度器：进程级单例 ----
@@ -150,6 +193,8 @@ export async function closeGatewayRuntime(): Promise<void> {
   }
   adListInit = null;
   sharedDomainFilter = null;
+  sharedExtensions = null;
+  setExternalEngineProviders([]);
   closeSemantic();
   sharedFlareSolverrClient = null;
   const pool = sharedBrowserPool;
@@ -283,6 +328,7 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
   const browserPool = getBrowserPool(settings, secrets, logger);
   const fetchStore = getFetchStore(settings, logger);
   const flareSolverr = getFlareSolverrClient(settings);
+  const extensions = await getExtensions(settings, secrets, logger);
 
   // searchService / fetchService 仍按会话持有（缓存与搜索并发保持会话级）；
   // 但广告过滤器通过进程级 getter 现取，fetch 共享进程级 FlareSolverr 闸门。
@@ -312,6 +358,7 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
         settings: { fetch: settings.fetch, bilibili: settings.bilibili, weibo: settings.weibo },
         secrets: { bilibili: { http: { token: secrets.bilibili.http.token } } },
         getSecret: (path) => getSecretAtPath(secrets, path),
+        registry: extensions.registry,
       },
     },
     logger,

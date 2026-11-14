@@ -25,7 +25,7 @@ const USAGE = `用法: asg extensions <search|install|list|remove> ...
   list                             列出已安装的第三方插件
   remove <id>                      删除 data/extensions/<id>
 
-说明：当前版本只完成安装；运行时加载将在后续版本接入，安装后不会重启网关。`;
+说明：安装后不会自动重启网关，重启服务（或下次运行 asg engines）后生效。`;
 
 export interface ExtensionsApi {
   install: typeof installExtension;
@@ -152,7 +152,7 @@ async function runInstall(
       `已安装 ${result.name} (${result.id}) v${result.version}`,
       `能力: ${result.provides.join(", ")}`,
       `路径: ${result.path}`,
-      "当前版本只完成安装；运行时加载将在后续版本接入。",
+      "重启网关后生效。",
     ].join("\n"),
   };
 }

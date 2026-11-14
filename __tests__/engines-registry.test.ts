@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   ENGINE_PROVIDERS,
   engineProvider,
   providersForGroup,
+  resetExternalEngineProvidersForTests,
+  setExternalEngineProviders,
 } from "../src/engines/registry.js";
-import type { EngineProviderContext } from "../src/engines/provider.js";
+import type { EngineProvider, EngineProviderContext } from "../src/engines/provider.js";
 import { tracemoeProvider } from "../src/engines/providers/tracemoe.js";
 import { saucenaoProvider } from "../src/engines/providers/saucenao.js";
 import { baiduProvider } from "../src/engines/providers/baidu.js";
@@ -17,6 +19,28 @@ function ctx(
 ): EngineProviderContext {
   return { config, secrets };
 }
+
+function fakeProvider(overrides: Partial<EngineProvider> = {}): EngineProvider {
+  return {
+    id: "gateway.search:demo",
+    group: "gateway.search",
+    name: "demo",
+    kind: "gateway",
+    displayName: "Demo",
+    routing: () => ["category:demo"],
+    available: () => true,
+    runtime: {
+      kind: "search",
+      plan: () => undefined,
+      search: async () => ({ ok: false, error: { kind: "api", message: "stub" }, latencyMs: 0 }),
+    },
+    ...overrides,
+  };
+}
+
+afterEach(() => {
+  resetExternalEngineProvidersForTests();
+});
 
 describe("引擎 provider 注册表", () => {
   it("provider id 唯一", () => {
@@ -125,5 +149,52 @@ describe("provider 元数据", () => {
     expect(runtime.plan("weibo,weibo_hot", providerCtx)).toEqual({ hot: true });
     expect(runtime.plan("general", providerCtx)).toBeUndefined();
     expect(runtime.plan(undefined, providerCtx)).toBeUndefined();
+  });
+});
+
+describe("外部引擎 provider overlay", () => {
+  it("外部同 id 覆盖内置，ENGINE_PROVIDERS 本身不变", () => {
+    const external = fakeProvider({
+      id: "gateway.search:weibo",
+      name: "weibo",
+      displayName: "外部微博",
+    });
+
+    setExternalEngineProviders([external]);
+
+    expect(engineProvider("gateway.search", "weibo")).toBe(external);
+    const group = providersForGroup("gateway.search");
+    expect(group).toContain(external);
+    expect(group.filter((provider) => provider.id === "gateway.search:weibo")).toHaveLength(1);
+    expect(ENGINE_PROVIDERS.find((provider) => provider.id === "gateway.search:weibo")).toBe(
+      weiboProvider,
+    );
+  });
+
+  it("providersForGroup 包含新增的外部 provider", () => {
+    const external = fakeProvider();
+    setExternalEngineProviders([external]);
+
+    expect(providersForGroup("gateway.search").map((provider) => provider.id)).toContain(
+      "gateway.search:demo",
+    );
+    expect(engineProvider("gateway.search", "demo")).toBe(external);
+    // 反向图搜组不受影响
+    expect(providersForGroup("gateway.reverse_image")).toHaveLength(GATEWAY_SOURCE_SPECS.length);
+  });
+
+  it("同一批内 id 重复时抛错", () => {
+    expect(() =>
+      setExternalEngineProviders([fakeProvider(), fakeProvider({ displayName: "重复" })]),
+    ).toThrow(/重复/);
+  });
+
+  it("清空外部 overlay 后恢复纯内置视图", () => {
+    setExternalEngineProviders([fakeProvider()]);
+    expect(engineProvider("gateway.search", "demo")).toBeDefined();
+
+    resetExternalEngineProvidersForTests();
+    expect(engineProvider("gateway.search", "demo")).toBeUndefined();
+    expect(engineProvider("gateway.search", "weibo")).toBe(weiboProvider);
   });
 });

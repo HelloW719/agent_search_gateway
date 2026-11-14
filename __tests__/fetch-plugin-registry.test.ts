@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchPluginRegistry, registeredPlugins } from "../src/fetch/plugins/index.js";
+import { fetchPluginRegistry, createFetchRegistry, registeredPlugins } from "../src/fetch/plugins/index.js";
 import { createFetchPluginRegistry } from "../src/fetch/plugins/registry.js";
 import type { FetchPlugin, FetchPluginContext, FetchPluginResult } from "../src/fetch/plugins/types.js";
 import { directFetch } from "../src/fetch/direct.js";
@@ -133,6 +133,48 @@ describe("FetchPluginRegistry", () => {
     expect(cnki.displayName).toBe("知网");
     expect(cnki.capabilities).toEqual(["pdf"]);
     expect(cnki.requires).toEqual([]);
+  });
+});
+
+describe("createFetchRegistry 外部插件合并", () => {
+  it("外部同 id 覆盖内置，其余保持内置顺序", () => {
+    const external = fakePlugin("weibo", () => true, {
+      displayName: "外部微博",
+      capabilities: ["post"],
+    });
+
+    const registry = createFetchRegistry([external]);
+
+    expect(registry.list().map((plugin) => plugin.id)).toEqual(["cnki", "bilibili", "weibo"]);
+    const weibo = registry.list().find((plugin) => plugin.id === "weibo")!;
+    expect(weibo).toBe(external);
+    expect(weibo.displayName).toBe("外部微博");
+    expect(registry.find(new URL("https://example.com/"), ctx())).toBe(external);
+  });
+
+  it("外部新增 id 追加在内置之后", () => {
+    const external = fakePlugin("demo", () => true);
+    const registry = createFetchRegistry([external]);
+
+    expect(registry.list().map((plugin) => plugin.id)).toEqual([
+      "cnki",
+      "bilibili",
+      "weibo",
+      "demo",
+    ]);
+    expect(registry.find(new URL("https://example.com/"), ctx())?.id).toBe("demo");
+  });
+
+  it("没有外部插件时等价于内置注册表", () => {
+    const registry = createFetchRegistry([]);
+    expect(registry.list().map((plugin) => plugin.id)).toEqual(registeredPlugins());
+    expect(registry.list()).toEqual(fetchPluginRegistry.list());
+  });
+
+  it("外部插件自身 id 重复时构造抛错", () => {
+    expect(() => createFetchRegistry([fakePlugin("dup", () => true), fakePlugin("dup", () => true)])).toThrow(
+      /重复/,
+    );
   });
 });
 

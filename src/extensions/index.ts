@@ -22,6 +22,8 @@ export {
   removeExtension,
   searchExtensions,
 } from "./install.js";
+export { loadExtensions } from "./loader.js";
+export type { LoadExtensionsOptions, LoadedExtensions } from "./loader.js";
 export type {
   Download,
   ExtensionSearchItem,

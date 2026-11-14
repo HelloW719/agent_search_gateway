@@ -9,7 +9,7 @@
 import { bilibiliPlugin } from "../../bilibili/index.js";
 import { weiboPlugin } from "../../weibo/index.js";
 import { cnkiPlugin } from "./cnki.js";
-import { createFetchPluginRegistry } from "./registry.js";
+import { createFetchPluginRegistry, type FetchPluginRegistry } from "./registry.js";
 import type { FetchPlugin, FetchPluginContext } from "./types.js";
 
 export type {
@@ -19,11 +19,31 @@ export type {
   FetchPluginResult,
 } from "./types.js";
 
-export const fetchPluginRegistry = createFetchPluginRegistry([
-  cnkiPlugin,
-  bilibiliPlugin,
-  weiboPlugin,
-]);
+/** 内置抓取插件：外部插件同 id 时由 `createFetchRegistry` 覆盖。 */
+export const builtinPlugins: readonly FetchPlugin[] = [cnkiPlugin, bilibiliPlugin, weiboPlugin];
+
+export const fetchPluginRegistry = createFetchPluginRegistry(builtinPlugins);
+
+/**
+ * 按 id 合并内置与外部插件：外部同 id 原位覆盖内置，新增 id 按加载顺序追加，
+ * 最终再交给 `createFetchPluginRegistry` 做重复校验。
+ */
+export function createFetchRegistry(external: readonly FetchPlugin[]): FetchPluginRegistry {
+  const externalById = new Map<string, FetchPlugin>();
+  for (const plugin of external) {
+    if (externalById.has(plugin.id)) throw new Error(`重复的抓取插件 id: ${plugin.id}`);
+    externalById.set(plugin.id, plugin);
+  }
+
+  const merged: FetchPlugin[] = builtinPlugins.map(
+    (plugin) => externalById.get(plugin.id) ?? plugin,
+  );
+  const builtinIds = new Set(builtinPlugins.map((plugin) => plugin.id));
+  for (const plugin of external) {
+    if (!builtinIds.has(plugin.id)) merged.push(plugin);
+  }
+  return createFetchPluginRegistry(merged);
+}
 
 /** 返回接管该 URL 的插件（已统一过滤 `enabled`，按注册顺序取第一个命中者）。 */
 export function findPlugin(url: URL, ctx: FetchPluginContext): FetchPlugin | undefined {

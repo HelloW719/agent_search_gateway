@@ -2,8 +2,9 @@
 
 本文说明第三方插件（extension）的 manifest、发布资产、安装目录与 `asg extensions` 命令。
 
-> **当前范围**：这一期只实现“插件声明 + 安装薄层”。网关**不会加载**安装后的插件代码，
-> 安装完成也**不会重启**网关。运行时加载、权限与沙箱留到后续版本。
+> **当前范围**：插件声明、安装薄层与运行时加载。网关启动（或 `asg engines list`）时会扫描
+> `data/extensions` 并 import 已安装插件；安装命令本身仍**不会重启**网关，需要重启一次让新插件生效。
+> 权限与沙箱仍留到后续版本。
 
 ## 1. 安装目录与状态
 
@@ -13,7 +14,8 @@
 - 卸载只删除 `data/extensions/<id>`，不修改 `gateway.yaml` / `secrets.yaml`。
 - `asg extensions list` 遇到损坏的安装目录时只把该条标记为错误（JSON 里有 `error` 字段），不会让整条命令失败。
 
-内置能力 `bilibili`、`weibo`、`cnki` 不允许作为第三方扩展安装或卸载。
+`bilibili`、`weibo`、`cnki` 是官方插件 id：内置实现已迁出，允许作为第三方扩展安装与卸载；
+运行期外部插件与内置实现同 id 时，以外部插件为准。
 
 ## 2. manifest：`asg-plugin.json`
 
@@ -27,6 +29,7 @@
 | `api_version` | 是 | 当前只接受字面量 `1` |
 | `provides` | 是 | 非空数组，元素只能是 `"search"` / `"fetch"`，不能重复 |
 | `entry` | 是 | 单个 `.mjs` / `.js` 文件名；不能含 `/`、`\`、`..`，不能是绝对路径 |
+| `platform` | 否 | 小写字母/数字/`-`；作为 fetch 插件的平台回退，缺省用 `id` |
 | `description` | 否 | 任意字符串 |
 
 示例：
@@ -45,14 +48,15 @@
 
 ## 3. `provides` 的语义
 
-| 值 | 含义 | 未来运行时约定 |
+| 值 | 含义 | 运行时约定 |
 | --- | --- | --- |
 | `search` | 提供搜索源/搜索计划 | 从 `entry` 读取命名导出 `engine` |
 | `fetch` | 提供抓取实现 | 从 `entry` 读取命名导出 `fetch` |
 | `["search", "fetch"]` | 同时提供两类能力 | 同一文件可同时导出 `engine` 与 `fetch` |
 
-`provides` 只是能力声明。当前版本不会 import 插件文件，因此导出名写错也不会
-影响安装；后续接入运行时时会先校验命名导出，再决定是否启用。
+`provides` 同时决定运行时校验：`fetch` 必须导出带 `match` / `fetch` 函数的对象，
+`search` 必须导出带 `id` / `group` / `name` / `runtime` 的对象。导出缺失或类型不符时，
+该插件会被跳过并在日志中告警，不影响其它插件与内置实现。
 
 ## 4. 发布资产
 
@@ -114,7 +118,7 @@ asg extensions remove example-fetch
 安装成功后人类输出会明确提示：
 
 ```text
-当前版本只完成安装；运行时加载将在后续版本接入。
+重启网关后生效。
 ```
 
 ### GitHub API 限流
@@ -134,20 +138,24 @@ export GITHUB_TOKEN=ghp_xxx
 
 - manifest 的 `id` 与 `entry` 都做了路径约束，安装目录不会逃出 `data/extensions/`。
 - 只接受 https 资产地址，并用 `SHA256SUMS` 校验 manifest 与 entry。
-- 内置 id 始终拒绝安装/卸载，避免第三方包覆盖网关能力。
-- **不加载、不执行插件代码**；安装后不重启整栈，也不读写网关配置与密钥。
+- 官方 id（`bilibili` / `weibo` / `cnki`）允许安装；同一 id 的外部插件在运行期覆盖内置实现。
+- 插件代码在网关进程内 import，**没有沙箱**；只安装可信来源。
+- **不读写**网关配置与密钥：插件通过自己的配置/环境变量获取凭据。
 
-## 7. 未来加载约定
+## 7. 运行时加载
 
-后续版本接入运行时加载时，计划采用以下约定（当前尚未实现）：
+网关启动时（`createServer` 首次调用，进程级只执行一次）以及 `asg engines list|enable|disable`
+会扫描 `data/extensions`：
 
-1. 读取 `data/extensions/<id>/asg-plugin.json`，校验 `api_version === 1`。
+1. 读取 `data/extensions/<id>/asg-plugin.json`，校验 `api_version === 1`，目录名必须等于 `manifest.id`。
 2. `import()` 安装目录内 `entry` 指向的文件（单个 ESM 文件，不得引用其它插件文件）。
 3. 按 `provides` 读取命名导出：
-   - `fetch`：抓取插件对象（`match` / `enabled` / `available` / `fetch`）；
-   - `engine`：搜索源对象。
-4. 单个插件加载失败只影响该插件，不影响网关启动与其它插件。
-5. 插件不得 import 网关内部模块，也不得依赖宿主 `node_modules` 中的非内置包；
-   需要跨进程能力时应通过 CLI / HTTP 自行实现。
+   - `fetch`：抓取插件对象（`match` / `enabled` / `available` / `fetch`），manifest 覆盖 `id` / `name` / `displayName` / `platform`；
+   - `engine`：搜索源对象（`id` / `group` / `name` / `runtime` 等）。
+4. 同一批外部插件内 id 重复视为扩展自身错误；与内置同 id 时外部覆盖内置。
+5. 单个插件加载失败只影响该插件，不影响网关启动与其它插件。
+
+插件不得 import 网关内部模块，也不得依赖宿主 `node_modules` 中的非内置包；
+需要跨进程能力时应通过 CLI / HTTP 自行实现。
 
 插件模板见 `examples/asg-plugin/`，发布时请给仓库加 `asg-plugin` topic。

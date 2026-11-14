@@ -9,6 +9,9 @@ import { CliError, EXIT } from "../errors.js";
 import type { Reporter } from "../output.js";
 import { takeFlag } from "../args.js";
 import { restartForConfig } from "../runtime/stack.js";
+import { loadExtensions } from "../../extensions/loader.js";
+import { setExternalEngineProviders } from "../../engines/registry.js";
+import type { Logger } from "../../logger.js";
 import {
   listEngines,
   parseEngineRef,
@@ -26,6 +29,33 @@ let restart: RestartFn = defaultRestart;
 /** 测试钩子：替换整栈重启，传 null 恢复默认。 */
 export function setRestartForTests(fn: RestartFn | null): void {
   restart = fn ?? defaultRestart;
+}
+
+/** 轻量 logger：扩展告警走 Reporter 事件，不污染 list 的 stdout。 */
+function extensionLogger(reporter: Reporter): Logger {
+  return {
+    debug: () => {},
+    info: () => {},
+    warn: (message: string) =>
+      reporter.event({ event: "log", service: "extensions", level: "warn", message }),
+    error: () => {},
+    close: () => {},
+  } as unknown as Logger;
+}
+
+/** 加载已安装扩展的 search 插件；单个坏包只告警，不让 `asg engines` 整体失败。 */
+async function applyExtensions(root: string, reporter: Reporter): Promise<void> {
+  try {
+    const loaded = await loadExtensions(root, { logger: extensionLogger(reporter) });
+    setExternalEngineProviders(loaded.engines);
+  } catch (error) {
+    reporter.event({
+      event: "log",
+      service: "extensions",
+      level: "warn",
+      message: `扩展加载失败，继续使用内置引擎：${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
 }
 
 function renderTable(engines: EngineInfo[], withSource: boolean): string {
@@ -55,12 +85,13 @@ function renderTable(engines: EngineInfo[], withSource: boolean): string {
   return [format(header), ...rows.map((row) => format(row))].join("\n");
 }
 
-async function runList(root: string, args: string[]): Promise<CommandResult> {
+async function runList(root: string, reporter: Reporter, args: string[]): Promise<CommandResult> {
   const all = takeFlag(args, "--all");
   if (args.length > 0) {
     throw new CliError("UNEXPECTED", EXIT.USAGE, "用法: asg engines list [--all]");
   }
 
+  await applyExtensions(root, reporter);
   const engines = await listEngines(root, { all });
   return {
     data: { scope: all ? "all" : "local", engines },
@@ -82,6 +113,7 @@ async function runToggle(
     throw new CliError("UNEXPECTED", EXIT.USAGE, usage);
   }
 
+  await applyExtensions(root, reporter);
   const local = readLocalEngines(root);
   const localIds = new Set(local.map((engine) => engine.id));
   const localNames = new Set(local.map((engine) => engine.name));
@@ -142,7 +174,7 @@ export const run: CommandFn = async ({ root, reporter, rest }) => {
 
   switch (sub) {
     case "list":
-      return runList(root, args);
+      return runList(root, reporter, args);
     case "enable":
       return runToggle(root, reporter, "enable", args);
     case "disable":

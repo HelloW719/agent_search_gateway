@@ -1,6 +1,7 @@
 import type { Logger } from "../logger.js";
 import { baseContentType, classifyContentType, formatBytes } from "./convert.js";
 import { fetchPluginRegistry } from "./plugins/index.js";
+import type { FetchPluginRegistry } from "./plugins/registry.js";
 import type { FetchPlugin, FetchPluginContext, FetchPluginResult } from "./plugins/types.js";
 import { isPrivateHost } from "./ssrf.js";
 import type { FetchPluginSecrets, FetchPluginSettings, FetchSettings } from "../settings/index.js";
@@ -12,6 +13,8 @@ export interface DirectFetchDeps {
     settings: FetchPluginSettings;
     secrets: FetchPluginSecrets;
     getSecret: (path: string) => string | undefined;
+    /** 进程级合并后的注册表（含外部插件）；缺省用内置注册表。 */
+    registry?: FetchPluginRegistry;
   };
 }
 
@@ -265,7 +268,7 @@ export async function directFetch(
     getSecret: deps.plugins.getSecret,
     logger,
   };
-  const plugin = fetchPluginRegistry.find(url, pluginCtx);
+  const plugin = (deps.plugins.registry ?? fetchPluginRegistry).find(url, pluginCtx);
   if (plugin) {
     logger?.debug(`fetch plugin matched: ${plugin.name} ${url.toString()}`);
     return await fetchViaPlugin(plugin, url, pluginCtx);
