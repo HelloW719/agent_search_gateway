@@ -169,7 +169,9 @@ export async function startStack(
       reporter.info(`以 pid 模式启动 supervisor：${invocation.command} ${invocation.args.join(" ")}`);
       const child = spawn(invocation.command, invocation.args, {
         cwd: root,
-        detached: process.platform !== "win32",
+        // `asg start` 会立即返回。Windows 只有 detached=true 才能在父
+        // CLI 或 GUI 任务结束后继续运行 supervisor。
+        detached: true,
         stdio: "ignore",
         windowsHide: true,
         env: process.env,
