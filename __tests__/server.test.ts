@@ -123,6 +123,26 @@ describe("MCP HTTP server", () => {
     expect(text).toContain("flaresolverr");
   });
 
+  it("GET /health 的 uptimeSec 按进程启动时间计算，且单调不减", async () => {
+    const readUptime = async (): Promise<number> => {
+      const res = await fetch(`${base}/health`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(typeof body.gateway.uptimeSec).toBe("number");
+      expect(body.gateway.uptimeSec).toBeGreaterThanOrEqual(0);
+      // server 模块加载晚于进程启动，uptime 不可能超过进程已存活时长
+      expect(body.gateway.uptimeSec).toBeLessThanOrEqual(Math.floor(process.uptime()) + 1);
+      return body.gateway.uptimeSec as number;
+    };
+
+    const first = await readUptime();
+    // 修复前 /health 把 Date.now() 当启动时间，uptimeSec 恒为 0；跨过 1 秒后必须增长
+    await sleep(1100);
+    const second = await readUptime();
+    expect(second).toBeGreaterThanOrEqual(first);
+    expect(second).toBeGreaterThanOrEqual(first + 1);
+  });
+
   it("tools/call search 的 num_results 超过旧上限 20 不再被参数校验拒绝", async () => {
     const init = await fetch(`${base}/mcp`, {
       method: "POST",

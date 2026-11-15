@@ -701,7 +701,7 @@ export async function startHttpServer(
     if (url.pathname === "/health" && req.method === "GET") {
       const report = await getHealth(
         { searxng: settings.searxng, flaresolverr: settings.flaresolverr, embedding: settings.embedding },
-        Date.now(),
+        PROCESS_STARTED_AT,
       );
       writeJson(res, 200, report);
       return;
