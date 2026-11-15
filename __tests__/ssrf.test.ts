@@ -136,3 +136,62 @@ describe("isPrivateHost", () => {
     expect(await isPrivateHost("[::ffff:8.8.8.8]")).toBe(false);
   });
 });
+
+describe("isPrivateHost —— 主机名侧编码 IP / 已知回环域名", () => {
+  beforeEach(() => {
+    mocks.lookup.mockReset();
+    // 默认模拟 Clash fake-ip：任意域名都解析到豁免段
+    mocks.lookup.mockResolvedValue([{ address: "198.18.0.68", family: 4 }]);
+  });
+
+  it("点分形式的内嵌私网 IP 判私有（不依赖 DNS 结果）", async () => {
+    expect(await isPrivateHost("127.0.0.1.nip.io")).toBe(true);
+    expect(await isPrivateHost("a.10.0.0.1.example")).toBe(true);
+    expect(await isPrivateHost("192.168.1.1.sslip.io")).toBe(true);
+  });
+
+  it("连字符形式的内嵌私网 IP 判私有", async () => {
+    expect(await isPrivateHost("127-0-0-1.nip.io")).toBe(true);
+    expect(await isPrivateHost("10-0-0-1.sslip.io")).toBe(true);
+    expect(await isPrivateHost("192-168-1-1.example.com")).toBe(true);
+  });
+
+  it("内嵌公网 IP 不拦（仍按 DNS 结果走）", async () => {
+    expect(await isPrivateHost("8.8.8.8.nip.io")).toBe(false);
+    expect(await isPrivateHost("1-2-3-4.example.com")).toBe(false);
+  });
+
+  it("已知回环域名及其子域直接判私有", async () => {
+    for (const h of [
+      "localtest.me",
+      "foo.localtest.me",
+      "lvh.me",
+      "a.b.lvh.me",
+      "vcap.me",
+      "app.vcap.me",
+      "local.gd",
+      "x.local.gd",
+    ]) {
+      expect(await isPrivateHost(h), h).toBe(true);
+    }
+  });
+
+  it("公网域名解析到公网 IP 判非私有", async () => {
+    mocks.lookup.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    expect(await isPrivateHost("example.com")).toBe(false);
+    expect(await isPrivateHost("www.example.com")).toBe(false);
+  });
+
+  it("豁免段下但 host 不含编码 IP 的域名仍放行", async () => {
+    expect(await isPrivateHost("github.com")).toBe(false);
+    expect(await isPrivateHost("api.example.org")).toBe(false);
+    // 5 段数字串不当作 IP，避免误判
+    expect(await isPrivateHost("1.2.3.4.5.example.com")).toBe(false);
+    expect(await isPrivateHost("10.0.0.1.5.example.com")).toBe(false);
+  });
+
+  it("宿主名不因超出 0-255 的段被误判", async () => {
+    expect(await isPrivateHost("999.0.0.1.example.com")).toBe(false);
+    expect(await isPrivateHost("127.0.0.256.nip.io")).toBe(false);
+  });
+});

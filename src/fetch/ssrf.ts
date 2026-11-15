@@ -13,7 +13,12 @@ const PRIVATE_CIDRS = [
   "fe80::/10",
 ];
 
-/** 默认豁免段：Clash/类似代理的 fake-ip 区间，连接后由 TUN 转发到真实出站，不触达内网。 */
+/**
+ * 默认豁免段：Clash/类似代理的 fake-ip 区间，连接后由 TUN 转发到真实出站，不触达内网。
+ * 注意：命中豁免段的**主机名**不提供域名维度保证——在 fake-ip 环境里所有域名
+ * （含 127.0.0.1.nip.io 这类编码 IP 的域名）都会解析到同一区间，因此主机名侧
+ * 的内嵌 IPv4 / 回环域名检测在 DNS 之前独立执行，不依赖这里的解析结果。
+ */
 export const DEFAULT_EXEMPT_CIDRS = [
   "198.18.0.0/15",
   "fdfe:dcba:9876::/64",
@@ -122,6 +127,41 @@ function isIpLiteral(host: string): boolean {
   return host.includes(":") && /^[0-9a-f:.]+$/.test(host);
 }
 
+/** 已知回环 / 通配解析到 127.0.0.1 的域名后缀（含其子域）。 */
+const LOOPBACK_DOMAIN_SUFFIXES = ["localtest.me", "lvh.me", "vcap.me", "local.gd"];
+
+function isLoopbackDomain(host: string): boolean {
+  return LOOPBACK_DOMAIN_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+}
+
+/**
+ * 提取域名中内嵌的 IPv4 候选：点分（127.0.0.1.nip.io）或连字符
+ * （127-0-0-1.nip.io）。只接受**连续 4 段**十进制且每段 0-255，
+ * 避免把 1.2.3.4.5 这类长串误当 IP。
+ */
+function embeddedIpv4Candidates(host: string): string[] {
+  const candidates: string[] = [];
+  let run: number[] = [];
+  const flushRun = () => {
+    if (run.length === 4) candidates.push(run.join("."));
+    run = [];
+  };
+  for (const token of host.split(/[.-]/)) {
+    if (/^\d{1,3}$/.test(token)) {
+      const n = Number(token);
+      if (n <= 255) {
+        run.push(n);
+        continue;
+      }
+      flushRun();
+      continue;
+    }
+    flushRun();
+  }
+  flushRun();
+  return candidates;
+}
+
 /** 解析 hostname 的所有 A/AAAA 记录，任一为私网 IP 即视为私有（SSRF 防护）。 */
 export async function isPrivateHost(
   hostname: string,
@@ -134,6 +174,11 @@ export async function isPrivateHost(
   // IP 字面量直接判定，不走 DNS：否则带括号/带点段的形式会让 lookup 抛错，
   // 落进下面的 catch 被当成"非私有"放行
   if (isIpLiteral(host)) return isPrivateIp(host, exemptCidrs);
+  // 已知回环域名（localtest.me 等）直接判私有，避免依赖 DNS 结果
+  if (isLoopbackDomain(host)) return true;
+  // 主机名侧的内嵌 IPv4 检测：Clash fake-ip 下所有域名（含 127.0.0.1.nip.io）
+  // 都解析到豁免段，只看 DNS 结果等于放行，因此先按字面编码判一次
+  if (embeddedIpv4Candidates(host).some((ip) => isPrivateIp(ip, exemptCidrs))) return true;
   try {
     const records = await lookup(host, { all: true });
     return records.some((r) => isPrivateIp(r.address, exemptCidrs));
