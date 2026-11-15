@@ -884,19 +884,6 @@ const ytdlpBackend = {
 };
 
 /** opencli（@jackwener/opencli，微博后端） */
-function syncWeiboOverride(name) {
-  const source = path.join(ROOT, "scripts", "opencli-overrides", "weibo");
-  if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
-    log(name, "当前分支不含微博插件（未找到 scripts/opencli-overrides/weibo/），已跳过。");
-    return false;
-  }
-
-  const destination = path.join(os.homedir(), ".opencli", "clis", "weibo");
-  copyDirectoryContents(source, destination);
-  log(name, `已复制微博插件到：${destination}`);
-  return true;
-}
-
 const opencliBackend = {
   name: "opencli",
   title: "opencli（@jackwener/opencli，微博后端）",
@@ -955,7 +942,6 @@ const opencliBackend = {
       throw new Error(`npm 安装后未找到命令：${command}`);
     }
 
-    syncWeiboOverride(this.name);
     return { command, version };
   },
 

@@ -11,6 +11,7 @@
 - 安装器：下载失败会列出每次尝试（fetch/curl/wget）的真实原因，不再被 `wget: spawn wget ENOENT` 覆盖；403/429 优先提示设置 `GITHUB_TOKEN`。
 - `GET /health` 与 MCP `health` 共用语义层快照，embedding 启用时不再恒报 `down`。
 - 网关侧搜索源鉴权失败映射为 `SEARCH_AUTH_REQUIRED`，不再混入可重试的 `SEARCH_UPSTREAM`。
+- `asg plugins install opencli` 不再尝试同步微博 override（历史遗留，安装版布局下必然跳过）；override 由微博扩展接管。
 
 ## [0.3.7] - 2026-11-15
 

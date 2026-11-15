@@ -516,7 +516,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 |---|---|---|
 | B 站 `bili` CLI | `asg plugins install bili` | PyPI `bili-agent`，需要 Python ≥3.10 |
 | `yt-dlp` | `asg plugins install ytdlp` | 官方独立二进制，自动校验 SHA256 |
-| 微博 `OpenCLI` | `asg plugins install opencli` | npm 包；微博 override 会复制到 `~/.opencli/clis/weibo/` |
+| 微博 `OpenCLI` | `asg plugins install opencli` | npm 包；微博 override 由微博扩展负责安装（过渡期可手动跑 `scripts/install-weibo-override.sh`） |
 | B 站专栏 HTTP 服务 | `asg plugins install article` | 独立仓库 `djasdh/bilibili-article-server`（GPL-3.0） |
 
 ```bash
