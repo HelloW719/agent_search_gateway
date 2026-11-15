@@ -397,7 +397,7 @@ async function main(argv = process.argv.slice(2)) {
       services: [
         deps.searxngResult.launch ? { ...deps.searxngResult.launch, name: 'searxng' } : null,
         deps.flaresolverrResult.launch
-          ? { ...deps.flaresolverrResult.launch, name: 'flaresolverr' }
+          ? { ...deps.flaresolverrResult.launch, name: 'flaresolverr', required: false }
           : null,
         gatewayLaunch,
       ],
@@ -429,7 +429,7 @@ async function main(argv = process.argv.slice(2)) {
     services: [
       deps.searxngResult.launch ? { ...deps.searxngResult.launch, name: 'searxng' } : null,
       deps.flaresolverrResult.launch
-        ? { ...deps.flaresolverrResult.launch, name: 'flaresolverr' }
+        ? { ...deps.flaresolverrResult.launch, name: 'flaresolverr', required: false }
         : null,
       gatewayLaunch,
     ],

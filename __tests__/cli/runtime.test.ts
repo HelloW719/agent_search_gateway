@@ -314,8 +314,34 @@ describe("launch.json 校验", () => {
     const config = loadLaunchConfig(root, file);
     expect(config.services.map((service) => service.name)).toEqual(["gateway", "worker"]);
     expect(config.services[0]!.env).toEqual({ FOO: "1" });
+    expect(config.services[0]!.required).toBe(true);
     expect(config.services[1]!.cwd).toBe(path.join(root, "sub"));
     expect(config.services[1]!.health).toBeNull();
+  });
+
+  it("支持显式可选服务，并兼容旧清单中的 flaresolverr", () => {
+    const root = tempRoot();
+    const config = parseLaunchConfig(
+      JSON.stringify({
+        services: [
+          {
+            name: "flaresolverr",
+            command: ["node", "solver.js"],
+            health: null,
+          },
+          {
+            name: "future-optional",
+            command: ["node", "optional.js"],
+            health: null,
+            required: false,
+          },
+        ],
+      }),
+      root,
+    );
+
+    expect(config.services[0]!.required).toBe(false);
+    expect(config.services[1]!.required).toBe(false);
   });
 
   it("缺少 services 时按空数组处理并给出 warning", () => {
@@ -361,6 +387,15 @@ describe("launch.json 校验", () => {
     expectSchemaError(() =>
       parseLaunchConfig(
         JSON.stringify({ services: [{ name: "a", command: ["node"], health: "ftp://x" }] }),
+        root,
+      ),
+    );
+
+    expectSchemaError(() =>
+      parseLaunchConfig(
+        JSON.stringify({
+          services: [{ name: "a", command: ["node"], required: "no" }],
+        }),
         root,
       ),
     );

@@ -17,6 +17,7 @@ export async function writeLaunchJson({ installRoot, services }) {
       cwd: item.cwd,
       env: item.env || {},
       health: item.health || null,
+      required: item.required !== false,
     })),
   };
   const tmp = `${file}.tmp-${process.pid}`;

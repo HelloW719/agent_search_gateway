@@ -11,6 +11,8 @@ export interface LaunchService {
   cwd: string;
   env: Record<string, string>;
   health: string | null;
+  /** 为 false 时，启动或健康检查失败只降级该服务，不停止整栈。 */
+  required: boolean;
 }
 
 export interface LaunchConfig {
@@ -95,7 +97,15 @@ function validateService(item: unknown, index: number, root: string): LaunchServ
     health = record.health;
   }
 
-  return { name, command, cwd, env, health };
+  if (record.required !== undefined && typeof record.required !== "boolean") {
+    throw schemaError(`${name}.required 必须是布尔值`);
+  }
+
+  // FlareSolverr 是网页渲染的兜底服务，搜索本身只依赖 SearXNG。旧版
+  // launch.json 没有 required 字段时也要允许搜索主链路启动。
+  const required = typeof record.required === "boolean" ? record.required : name !== "flaresolverr";
+
+  return { name, command, cwd, env, health, required };
 }
 
 /** 解析 launch.json 文本；root 用于解析相对 cwd。 */

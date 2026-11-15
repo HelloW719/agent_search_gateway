@@ -222,6 +222,11 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
         return;
       }
 
+      if (!svc.required) {
+        sup(svc.name, `可选服务意外退出（${detail}），继续运行其余服务`);
+        return;
+      }
+
       sup(svc.name, `意外退出（${detail}），正在停止其余服务`);
       const exitCode = typeof code === "number" && code !== 0 ? code : 1;
       void initiateShutdown({ code: exitCode, reason: `子进程退出：${svc.name}` });
@@ -260,6 +265,16 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
     log("supervisor", `${remaining.length} 个进程未在 ${stopGraceMs}ms 内退出，强制结束进程树`);
     for (const record of remaining) sendSignal(record, "SIGKILL", true);
     await waitOrTimeout(Promise.all(remaining.map((record) => record.exitPromise)), 3000);
+  }
+
+  async function stopService(record: ServiceRecord): Promise<void> {
+    if (record.external || !record.child || record.exited) return;
+    sendSignal(record, "SIGTERM");
+    await waitOrTimeout(record.exitPromise, stopGraceMs);
+    if (!record.exited) {
+      sendSignal(record, "SIGKILL", true);
+      await waitOrTimeout(record.exitPromise, 3000);
+    }
   }
 
   async function initiateShutdown(options_: {
@@ -403,6 +418,7 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
     log("supervisor", `项目根目录：${root}`);
     log("supervisor", `配置文件：${paths.launch}`);
     log("supervisor", `共 ${config.services.length} 个服务`);
+    let readyServices = 0;
 
     for (const svc of config.services) {
       if (state.shuttingDown) break;
@@ -423,6 +439,7 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
             resolveExit: () => {},
           });
           sup(svc.name, `已在运行（${svc.health}），跳过启动并纳入监督`);
+          readyServices += 1;
           continue;
         }
       }
@@ -444,6 +461,14 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
       const healthy = await waitForHealth(record, healthTimeoutMs, healthIntervalMs);
       if (!healthy) {
         if (state.shuttingDown) break;
+        if (!svc.required) {
+          sup(
+            svc.name,
+            `可选服务未就绪：${svc.health ?? "无健康检查"}；继续启动其余服务`,
+          );
+          await stopService(record);
+          continue;
+        }
         sup(
           svc.name,
           `健康检查超时（${Math.round(healthTimeoutMs / 1000)} 秒）：${svc.health}`,
@@ -452,6 +477,7 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
         break;
       }
       sup(svc.name, `健康检查通过：${svc.health}`);
+      readyServices += 1;
     }
 
     if (state.shuttingDown) {
@@ -465,7 +491,10 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
     if (config.services.length === 0) {
       log("supervisor", "没有需要启动的服务，仅保持前台监督；按 Ctrl+C 退出");
     } else {
-      log("supervisor", `全部 ${config.services.length} 个服务已就绪，进入监督模式`);
+      log(
+        "supervisor",
+        `${readyServices}/${config.services.length} 个服务健康，进入监督模式`,
+      );
     }
 
     await shutdownDone;
