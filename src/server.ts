@@ -664,8 +664,13 @@ function readJsonBody(req: import("node:http").IncomingMessage): Promise<unknown
   });
 }
 
-function writeJson(res: import("node:http").ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+function writeJson(
+  res: import("node:http").ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
+  res.writeHead(status, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(body));
 }
 
@@ -740,7 +745,7 @@ export async function startHttpServer(
 
     // 可选 Bearer token 认证
     if (secrets.gateway.token && req.headers.authorization !== `Bearer ${secrets.gateway.token}`) {
-      writeJson(res, 401, { error: "unauthorized" });
+      writeJson(res, 401, { error: "unauthorized" }, { "WWW-Authenticate": "Bearer" });
       return;
     }
 
@@ -837,23 +842,33 @@ export async function startHttpServer(
 
     if (method === "DELETE") {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      if (sessionId && sessions.has(sessionId)) {
-        const s = sessions.get(sessionId)!;
-        sessions.delete(sessionId);
-        releaseBrowserSession(sessionId);
-        try {
-          await s.transport.close();
-        } catch (err) {
-          logger.warn(`error closing session transport: ${String(err)}`);
-        }
-        logger.debug(`session deleted: ${sessionId}`);
+      if (!sessionId) {
+        writeJson(res, 400, {
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: missing session id" },
+          id: null,
+        });
+        return;
       }
+      if (!sessions.has(sessionId)) {
+        writeJson(res, 404, { error: "session not found" });
+        return;
+      }
+      const s = sessions.get(sessionId)!;
+      sessions.delete(sessionId);
+      releaseBrowserSession(sessionId);
+      try {
+        await s.transport.close();
+      } catch (err) {
+        logger.warn(`error closing session transport: ${String(err)}`);
+      }
+      logger.debug(`session deleted: ${sessionId}`);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
 
-    writeJson(res, 405, { error: "method not allowed" });
+    writeJson(res, 405, { error: "method not allowed" }, { Allow: "GET, POST, DELETE" });
   });
 
   await new Promise<void>((resolve, reject) => {

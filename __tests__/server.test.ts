@@ -248,6 +248,47 @@ describe("MCP HTTP server", () => {
     const traversal = await fetch(`${base}/files/..%2F..%2Fetc%2Fpasswd`);
     expect(traversal.status).toBe(404);
   });
+
+  it("DELETE /mcp 无 session id 返回 400，而不是 {ok:true}", async () => {
+    const res = await fetch(`${base}/mcp`, { method: "DELETE" });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toEqual({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Bad Request: missing session id" },
+      id: null,
+    });
+    expect(body.ok).toBeUndefined();
+  });
+
+  it("DELETE /mcp 未知 session id 返回 404", async () => {
+    const res = await fetch(`${base}/mcp`, {
+      method: "DELETE",
+      headers: { "Mcp-Session-Id": "not-a-real-session" },
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "session not found" });
+  });
+
+  it("DELETE /mcp 已知 session 返回 200 {ok:true} 并使其失效", async () => {
+    const sid = await initSession(base);
+    const res = await fetch(`${base}/mcp`, { method: "DELETE", headers: { "Mcp-Session-Id": sid } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+
+    // 会话已被删除：再次 DELETE 视为未知 session
+    const again = await fetch(`${base}/mcp`, { method: "DELETE", headers: { "Mcp-Session-Id": sid } });
+    expect(again.status).toBe(404);
+  });
+
+  it("PUT /mcp 返回 405 且 Allow 头包含 GET/POST/DELETE", async () => {
+    const res = await fetch(`${base}/mcp`, { method: "PUT", body: "{}" });
+    expect(res.status).toBe(405);
+    const allow = res.headers.get("allow") ?? "";
+    expect(allow).toContain("GET");
+    expect(allow).toContain("POST");
+    expect(allow).toContain("DELETE");
+  });
 });
 
 describe("token 认证", () => {
@@ -275,6 +316,12 @@ describe("token 认证", () => {
   it("错误 token 返回 401", async () => {
     const { status } = await mcpRequest(base, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { token: "wrong" });
     expect(status).toBe(401);
+  });
+
+  it("401 响应带 WWW-Authenticate: Bearer 头", async () => {
+    const { status, headers } = await mcpRequest(base, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    expect(status).toBe(401);
+    expect(headers.get("www-authenticate")).toBe("Bearer");
   });
 
   it("正确 token 通过认证", async () => {
