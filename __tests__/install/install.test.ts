@@ -1,7 +1,17 @@
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import { prepareConfig } from "../../scripts/install/config.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
-import { parseArgs, platformTag } from "../../scripts/install/cli.mjs";
+import {
+  launchFile,
+  readLaunchJson,
+  writeLaunchJson,
+} from "../../scripts/install/launch.mjs";
+// @ts-expect-error 纯 JS 安装脚本没有类型声明
+import {
+  parseArgs,
+  platformTag,
+  refreshLaunchWithGateway,
+} from "../../scripts/install/cli.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import { installSearxng } from "../../scripts/install/deps/searxng.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
@@ -28,6 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { parseLaunchConfig } from "../../src/cli/runtime/launch.js";
 
 const ROOT = process.cwd();
 const dirs: string[] = [];
@@ -147,6 +158,43 @@ describe("配置生成", () => {
       flaresolverrEnabled: true,
     });
     expect(second.token).toBe(first.token);
+  });
+});
+
+describe("启动清单", () => {
+  it("--launch-only 重写旧清单后 flaresolverr 仍按可选服务解析", async () => {
+    const installRoot = tmp();
+    await writeLaunchJson({
+      installRoot,
+      services: [
+        {
+          name: "flaresolverr",
+          command: ["flaresolverr"],
+          cwd: installRoot,
+          env: {},
+          health: "http://127.0.0.1:8192/",
+        },
+      ],
+    });
+    await refreshLaunchWithGateway({
+      installRoot,
+      gatewayLaunch: {
+        name: "gateway",
+        command: ["node", "dist/index.js"],
+        cwd: installRoot,
+        env: {},
+        health: "http://127.0.0.1:3000/health",
+      },
+    });
+
+    const written = await readLaunchJson({ installRoot });
+    expect(written.services[0].required).toBeUndefined();
+    const parsed = parseLaunchConfig(
+      readFileSync(launchFile(installRoot), "utf8"),
+      installRoot,
+    );
+    expect(parsed.services[0]!.required).toBe(false);
+    expect(parsed.services[1]!.required).toBe(true);
   });
 });
 
