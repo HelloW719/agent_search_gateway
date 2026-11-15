@@ -2,6 +2,41 @@
 
 本项目遵循语义化版本，条目按版本倒序。
 
+## [0.3.7] - 2026-11-15
+
+### Added
+
+- 第三方插件私有配置：`asg-plugin.json` 可选 `config_schema`（JSON Schema 子集）声明字段、类型、默认值与必填；值存 `gateway.yaml → extensions.<manifest id>.config`，运行期注入 `ctx.pluginConfig`。
+- 插件密钥新增 `secrets.yaml → extensions.<manifest id>.<name>` 键，运行期注入 `ctx.pluginSecrets`；旧 `extensions.<engineId>.<name>` 继续兼容。
+- 新增 `asg extensions config`：`--get` / `--set` / `--unset` / `--file` / `--describe`，支持多字段与嵌套键。
+- 新增 `asg extensions secret`：从 stdin 写插件密钥，写入 0600 的 `secrets.yaml`，不回显明文。
+- 插件 skills 增加私有配置章节、字段命名规范与示例；新增 ADR-0021。
+
+### Changed
+
+- 插件配置字段统一 snake_case（`enabled` / `base_url` / `timeout_ms` / `limit` / `max_retries` 等）。
+- `asg engines enable` 的 `secret:` 依赖检查同时识别 manifest id 与 engineId 键；扩展 `enabledPath` 可指向 `extensions.<id>.config.enabled`。
+- `asg extensions config` / `secret` 写入前整体校验，成功后整栈重启；默认值只在运行期补齐，不写回配置。
+
+### Fixed
+
+- POST `/mcp` 收到非法 JSON 或超过 1MB 的 body 时不再永久挂起：分别返回 400 / 413 JSON-RPC 错误。
+- `fetch` 的 JSON 响应原样返回，避免 64 位整数与大数精度丢失。
+- `fetch` 的 HTML 清洗限定在 `body` 内，正文为空时回退 full，避免 Wikipedia 等静态页被误判为 JS 空壳。
+- `browser_*` 同一 MCP 会话串行执行，避免共享 page 并发导航串台。
+- `fetch` 非 2xx 使用 `FETCH_HTTP_STATUS`；304 不再误报重定向错误，204/205 返回明确的空响应。
+- `fetch` 无 `Content-Type` 时嗅探文本，避免把文本响应误落盘为 `.bin`。
+- `fetch` 拒绝带凭据的 URL，日志与错误文本统一脱敏；`max_chars` 成为最终硬上限。
+- SSRF 拦截域名内嵌私网 IP（点分/连字符），不依赖 DNS 结果。
+- `browser_*` 失败返回 `isError: true` 并清洗 ANSI；选择器操作上限 8 秒、长度上限 500 字符。
+- `/health` 的 `uptimeSec` 使用进程启动时间，不再恒为 0。
+- MCP 401 补 `WWW-Authenticate`、405 补 `Allow`；`DELETE /mcp` 缺 session 返回 400，未知 session 返回 404。
+- 显式 `engines` 全部不可用时返回 `SEARCH_INVALID`；未知类别改为结果末尾提示，不再硬拒绝。
+- `search_by_image` 且 query 不是图片 URL 时返回 `SEARCH_INVALID`，不再静默降级为普通网页搜索。
+- `search` 的 query 先 trim，纯空白串与空串行为一致。
+- CLI 选项缺值、单横线未知选项、重复指定都按用法错误处理。
+- 清理扩展化后遗留的微博文案；微博 / B 站 / 知网能力由官方扩展提供。
+
 ## [0.3.6] - 2026-11-15
 
 ### Added
