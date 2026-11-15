@@ -11,6 +11,17 @@ describe("htmlToMarkdown", () => {
     expect(r.title).toBe("Page Title");
   });
 
+  it("head 里的内联脚本不进正文（clean/full 都不进）", () => {
+    const html =
+      '<html><head><title>T</title><script>var x = "head-script";</script></head>' +
+      "<body><article><p>正文</p></article></body></html>";
+    for (const structural of ["clean", "full"] as const) {
+      const r = htmlToMarkdown(html, { structural, baseUrl: "https://e.com", maxOutputChars: 10000 });
+      expect(r.markdown).not.toContain("head-script");
+      expect(r.markdown).toContain("正文");
+    }
+  });
+
   it("clean 模式移除 nav/footer/script/style/广告容器", () => {
     const html = `
       <html><body>

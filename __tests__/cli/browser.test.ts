@@ -12,6 +12,7 @@ import {
   playwrightCacheDir,
 } from "../../src/cli/deps/browser.js";
 import type { StreamRunner } from "../../src/cli/deps/plugins.js";
+import { mcpSessionContext } from "../../src/utils/session-context.js";
 import { browserToolDeps, makeSettings } from "../helpers/settings.js";
 
 const tempDirs: string[] = [];
@@ -250,5 +251,160 @@ describe("BrowserTools 选择器超时与长度上限", () => {
     const r = await tools.click("#btn");
     expect(r.ok).toBe(false);
     expect(r.error).toBe("locator.click: Timeout 8000ms exceeded.");
+  });
+});
+
+type Interval = { start: number; end: number };
+
+/**
+ * 记录每次操作起止时间的假 page（navigate 会 goto + snapshot）。
+ * - intervals：goto 区间
+ * - evalIntervals：evaluate 区间（scroll 用）
+ * - ariaIntervals：ariaSnapshot 区间（find / snapshot 用）
+ * - failGotos：前 N 次 goto 抛错，用于验证失败不卡死串行链
+ */
+function makeTimedPage(
+  opts: {
+    delayMs?: number;
+    failGotos?: number;
+    evaluateDelayMs?: number;
+    ariaDelayMs?: number;
+  } = {},
+): { page: Page; intervals: Interval[]; evalIntervals: Interval[]; ariaIntervals: Interval[] } {
+  const delayMs = opts.delayMs ?? 50;
+  const failGotos = opts.failGotos ?? 0;
+  const evaluateDelayMs = opts.evaluateDelayMs ?? 0;
+  const ariaDelayMs = opts.ariaDelayMs ?? 0;
+  const intervals: Interval[] = [];
+  const evalIntervals: Interval[] = [];
+  const ariaIntervals: Interval[] = [];
+  let gotoCalls = 0;
+
+  const record = async (bucket: Interval[], ms: number): Promise<void> => {
+    const start = Date.now();
+    if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+    bucket.push({ start, end: Date.now() });
+  };
+
+  const page = {
+    async goto() {
+      const index = gotoCalls++;
+      const start = Date.now();
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      intervals.push({ start, end: Date.now() });
+      if (index < failGotos) throw new Error("page.goto 失败");
+      return null;
+    },
+    async evaluate() {
+      await record(evalIntervals, evaluateDelayMs);
+      return null;
+    },
+    url: () => "about:blank",
+    locator: () => {
+      const handle = {
+        first: () => handle,
+        ariaSnapshot: async () => {
+          await record(ariaIntervals, ariaDelayMs);
+          return "snapshot";
+        },
+      };
+      return handle;
+    },
+  };
+  return { page: page as unknown as Page, intervals, evalIntervals, ariaIntervals };
+}
+
+/** navigate 需要 pool.enabled，且测试不走真实 DNS：关闭 SSRF 私网校验。 */
+function makeTimedTools(page: Page) {
+  const pool = {
+    enabled: true,
+    acquireSession: async () => ({ page }),
+  } as unknown as BrowserPool;
+  const settings = makeSettings({
+    browser: { timeout_ms: 5000 },
+    fetch: { block_private_ips: false },
+  });
+  return new BrowserTools(pool, browserToolDeps(settings));
+}
+
+describe("BrowserTools 按会话串行化", () => {
+  it("同一 session 的并发 navigate 串行执行", async () => {
+    const { page, intervals } = makeTimedPage();
+    const tools = makeTimedTools(page);
+
+    const results = await mcpSessionContext.run("s1", () =>
+      Promise.all([
+        tools.navigate("https://example.com/a"),
+        tools.navigate("https://example.com/b"),
+      ]),
+    );
+
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(intervals).toHaveLength(2);
+    // 第二段必须在第一段结束之后才开始
+    expect(intervals[1].start).toBeGreaterThanOrEqual(intervals[0].end);
+  });
+
+  it("不同 session 的并发 navigate 并行执行", async () => {
+    const { page, intervals } = makeTimedPage();
+    const tools = makeTimedTools(page);
+
+    await Promise.all([
+      mcpSessionContext.run("s1", () => tools.navigate("https://example.com/a")),
+      mcpSessionContext.run("s2", () => tools.navigate("https://example.com/b")),
+    ]);
+
+    expect(intervals).toHaveLength(2);
+    // 两段区间有重叠（互不等待）
+    const [x, y] = intervals;
+    expect(x.start).toBeLessThan(y.end);
+    expect(y.start).toBeLessThan(x.end);
+  });
+
+  it("一次 navigate 抛错后，同 session 的后续 navigate 仍能执行", async () => {
+    const { page, intervals } = makeTimedPage({ failGotos: 1 });
+    const tools = makeTimedTools(page);
+
+    const [failed, succeeded] = await mcpSessionContext.run("s1", () =>
+      Promise.all([
+        tools.navigate("https://example.com/fail"),
+        tools.navigate("https://example.com/ok"),
+      ]),
+    );
+
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toContain("page.goto 失败");
+    expect(succeeded.ok).toBe(true);
+    expect(intervals).toHaveLength(2);
+    // 失败也推进了链：第二次仍在第一次结束之后开始
+    expect(intervals[1].start).toBeGreaterThanOrEqual(intervals[0].end);
+  });
+
+  it("同一 session 的并发 scroll 串行执行", async () => {
+    const { page, evalIntervals } = makeTimedPage({ evaluateDelayMs: 50 });
+    const tools = makeTimedTools(page);
+
+    const results = await mcpSessionContext.run("s1", () =>
+      Promise.all([tools.scroll("down"), tools.scroll("up")]),
+    );
+
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(evalIntervals).toHaveLength(2);
+    // 第二次滚动必须在第一次滚动结束后才开始（不会互相覆盖滚动位置）
+    expect(evalIntervals[1].start).toBeGreaterThanOrEqual(evalIntervals[0].end);
+  });
+
+  it("同一 session 的并发 find 串行执行", async () => {
+    const { page, ariaIntervals } = makeTimedPage({ ariaDelayMs: 50 });
+    const tools = makeTimedTools(page);
+
+    const results = await mcpSessionContext.run("s1", () =>
+      Promise.all([tools.find("snap"), tools.find("shot")]),
+    );
+
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(ariaIntervals).toHaveLength(2);
+    // 两次 ariaSnapshot 读取不重叠
+    expect(ariaIntervals[1].start).toBeGreaterThanOrEqual(ariaIntervals[0].end);
   });
 });

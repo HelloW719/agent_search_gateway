@@ -156,6 +156,10 @@ function renderMarkdown(
   const titleEl = doc.querySelector("title");
   if (titleEl) titleEl.remove();
 
+  // head 里的 meta/script 不是正文：turndown 会把整个文档序列化，
+  // 不删 head 时内联脚本源码会混进 markdown（Wikipedia 的 client-js 就是这种）。
+  doc.querySelector("head")?.remove();
+
   if (structural === "clean") {
     removeNoiseElements(doc);
   }
