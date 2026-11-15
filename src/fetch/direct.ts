@@ -1,5 +1,5 @@
 import type { Logger } from "../logger.js";
-import { baseContentType, classifyContentType, formatBytes } from "./convert.js";
+import { baseContentType, classifyContentType, formatBytes, looksLikeText } from "./convert.js";
 import { fetchPluginRegistry } from "./plugins/index.js";
 import type { FetchPluginRegistry } from "./plugins/registry.js";
 import type { FetchPlugin, FetchPluginContext, FetchPluginResult } from "./plugins/types.js";
@@ -447,6 +447,21 @@ export async function directFetch(
           finalUrl: currentUrl.toString(),
           kind: "text",
           text: decodeBody(buf, contentType, true),
+          truncated,
+        };
+      }
+
+      // 兜底嗅探：服务端没给 Content-Type 或只给 octet-stream 时，正文常是纯文本。
+      // 只对已读到的 buf 判断（不额外读流）；已知二进制类型（image/*、pdf、zip…）不嗅探。
+      const base = baseContentType(contentType);
+      if ((base === "" || base === "application/octet-stream") && looksLikeText(buf)) {
+        return {
+          ok: true,
+          status,
+          contentType: contentType || "text/plain; charset=utf-8",
+          finalUrl: currentUrl.toString(),
+          kind: "text",
+          text: new TextDecoder("utf-8").decode(buf),
           truncated,
         };
       }

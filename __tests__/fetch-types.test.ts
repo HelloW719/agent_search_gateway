@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { formatBytes } from "../src/fetch/convert.js";
+import { formatBytes, looksLikeText } from "../src/fetch/convert.js";
 import { createFetchService } from "../src/fetch/service.js";
 import type { FetchServiceDeps } from "../src/fetch/service.js";
 import { deepMerge, fetchServiceDeps, makeSettings, type DeepPartial } from "./helpers/settings.js";
@@ -59,6 +59,11 @@ beforeAll(async () => {
         res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("hello 纯文本\n第二行");
         return;
+      case "/no-type":
+        // 服务端不声明 Content-Type：应靠兜底嗅探按文本处理
+        res.writeHead(200);
+        res.end("no content type, but plain text");
+        return;
       case "/json":
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ b: 1, a: [1, 2] }));
@@ -111,6 +116,14 @@ describe("fetch 全类型分派", () => {
     const r = await svc.fetch({ url: `${base}/plain` });
     expect(r.ok).toBe(true);
     expect(r.text).toContain("hello 纯文本");
+  });
+
+  it("无 Content-Type 的文本响应按正文返回（兜底嗅探）", async () => {
+    const svc = createFetchService(makeConfig(), silentLogger, undefined, tmpStore());
+    const r = await svc.fetch({ url: `${base}/no-type` });
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain("no content type, but plain text");
+    expect(r.text).not.toContain("已下载文件");
   });
 
   it("application/json 美化为 json 代码块", async () => {
@@ -184,6 +197,35 @@ describe("fetch 全类型分派", () => {
     const r = await svc.fetch({ url: `${base}/png` });
     expect(r.ok).toBe(false);
     expect(r.code).toBe("FETCH_UNSUPPORTED_TYPE");
+  });
+});
+
+describe("looksLikeText", () => {
+  it("纯文本 / JSON 判为文本", () => {
+    expect(looksLikeText(Buffer.from("hello 世界\n第二行\r\n\tindent\f"))).toBe(true);
+    expect(looksLikeText(Buffer.from(JSON.stringify({ a: [1, 2], b: "x" })))).toBe(true);
+  });
+
+  it("空 buf 判为非文本", () => {
+    expect(looksLikeText(Buffer.alloc(0))).toBe(false);
+  });
+
+  it("PNG 魔数判为非文本", () => {
+    expect(looksLikeText(Buffer.from("\x89PNG\r\n\x1a\n", "latin1"))).toBe(false);
+  });
+
+  it("含 NUL 字节判为非文本", () => {
+    expect(looksLikeText(Buffer.from("text\0more", "latin1"))).toBe(false);
+  });
+
+  it("非法 UTF-8 判为非文本", () => {
+    expect(looksLikeText(Buffer.from([0xff, 0xfe, 0x41, 0x42]))).toBe(false);
+  });
+
+  it("控制字符占比 > 1% 判为非文本", () => {
+    expect(looksLikeText(Buffer.from("\x01\x02abcdefgh", "latin1"))).toBe(false);
+    // 100 个字符里 1 个控制字符 = 1%，仍算文本
+    expect(looksLikeText(Buffer.from(`\x01${"a".repeat(99)}`, "latin1"))).toBe(true);
   });
 });
 

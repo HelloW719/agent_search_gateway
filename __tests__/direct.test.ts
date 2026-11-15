@@ -42,6 +42,17 @@ beforeAll(async () => {
     } else if (url.pathname === "/plain") {
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("纯文本");
+    } else if (url.pathname === "/no-type") {
+      // 服务端不声明 Content-Type
+      res.writeHead(200);
+      res.end("没有 content-type 的纯文本");
+    } else if (url.pathname === "/octet-text") {
+      // 错误声明为 octet-stream，但实际是文本
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end("octet-stream 但其实是文本");
+    } else if (url.pathname === "/png") {
+      res.writeHead(200, { "Content-Type": "image/png" });
+      res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]));
     } else if (url.pathname === "/bigbin") {
       res.writeHead(200, { "Content-Type": "application/octet-stream" });
       res.end(Buffer.alloc(4096, 1));
@@ -118,6 +129,30 @@ describe("directFetch", () => {
     expect(r.ok).toBe(true);
     expect(r.kind).toBe("text");
     expect(r.text).toBe("纯文本");
+  });
+
+  it("无 Content-Type 的文本响应靠嗅探按 text 返回", async () => {
+    const r = await directFetch(makeConfig(), `${base}/no-type`);
+    expect(r.ok).toBe(true);
+    expect(r.kind).toBe("text");
+    expect(r.text).toBe("没有 content-type 的纯文本");
+  });
+
+  it("误标 application/octet-stream 的文本按 text 返回，保留原 Content-Type", async () => {
+    const r = await directFetch(makeConfig(), `${base}/octet-text`);
+    expect(r.ok).toBe(true);
+    expect(r.kind).toBe("text");
+    expect(r.text).toBe("octet-stream 但其实是文本");
+    expect(r.contentType).toBe("application/octet-stream");
+  });
+
+  it("image/png 不嗅探，仍按 binary 返回", async () => {
+    const r = await directFetch(makeConfig(), `${base}/png`);
+    expect(r.ok).toBe(true);
+    expect(r.kind).toBe("binary");
+    expect(r.contentType).toBe("image/png");
+    expect(r.text).toBeUndefined();
+    expect(r.bytes?.length).toBe(12);
   });
 
   it("二进制超 max_download_bytes 返回 too_large", async () => {

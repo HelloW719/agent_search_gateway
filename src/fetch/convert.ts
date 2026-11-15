@@ -37,6 +37,38 @@ export function classifyContentType(ct: string | undefined): PayloadKind {
   return "binary";
 }
 
+/** 文本嗅探允许出现的控制字符：制表/换行/回车/换页。 */
+function isAllowedControl(code: number): boolean {
+  return code === 0x09 || code === 0x0a || code === 0x0d || code === 0x0c;
+}
+
+/**
+ * 兜底嗅探已读到的字节是否像文本。
+ * 用于 Content-Type 缺失或只有 application/octet-stream 的场景：这类响应常是纯文本，
+ * 若一律落盘 .bin 就把正文挤出了上下文。
+ * 判定：非空 → 无 NUL → 可按 UTF-8 严格解码 → 控制字符（除 \t\n\r\f）占比 ≤ 1%。
+ */
+export function looksLikeText(buf: Buffer): boolean {
+  if (buf.length === 0) return false;
+  if (buf.includes(0)) return false;
+
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    return false;
+  }
+  if (decoded.length === 0) return false;
+
+  let control = 0;
+  for (let i = 0; i < decoded.length; i++) {
+    const code = decoded.charCodeAt(i);
+    if (isAllowedControl(code)) continue;
+    if (code < 0x20 || code === 0x7f) control += 1;
+  }
+  return control / decoded.length <= 0.01;
+}
+
 /** 落盘文件扩展名（按 Content-Type 推断；未知回退 .bin）。 */
 const EXT_BY_TYPE: Record<string, string> = {
   "application/pdf": ".pdf",
