@@ -69,7 +69,7 @@
 6. **进程模型。**
 
    - 生命周期单位是**整栈**：只提供 `start` / `stop` / `restart`，不提供单组件操作；
-   - `asg serve` 就是 supervisor，保持现有 `start-all` 语义：按 `launch.json` 启动、健康轮询、任一子进程退出则整栈停止并以非 0 退出，交给服务管理器重启；
+   - `asg serve` 就是 supervisor：按 `launch.json` 启动、健康轮询；必需服务退出时整栈停止并以非 0 退出，可选服务失败时只降级该能力并继续监督其余服务；
    - 已注册服务管理器时，CLI 只调用平台命令；未注册时，`asg start` 以 detached 方式启动 `asg serve`，pid 写入 `data/runtime/supervisor.pid`；
    - 不引入 `state.json`、`desired.json`、控制 socket 或 named pipe；
    - `asg status` 只做 HTTP 探测，不读写状态文件。

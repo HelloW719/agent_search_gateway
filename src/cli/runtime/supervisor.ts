@@ -25,6 +25,8 @@ export interface SupervisorOptions {
   healthIntervalMs?: number;
   stopGraceMs?: number;
   monitorIntervalMs?: number;
+  /** 仅用于测试注入；收到 abort 时按正常停止处理。 */
+  shutdownSignal?: AbortSignal;
   /** 仅用于测试注入；默认 process.platform。 */
   platform?: NodeJS.Platform;
 }
@@ -121,11 +123,29 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
   let keepAliveTimer: NodeJS.Timeout | null = null;
   let pidWritten = false;
   const signalHandlers: Array<{ signal: NodeJS.Signals; handler: () => void }> = [];
+  const shutdownSignal = options.shutdownSignal;
+  let abortHandler: (() => void) | null = null;
 
   const log = (service: string, message: string): void => logs.line(service, message);
   /** supervisor 自身消息：只写 supervisor.log，服务名放进正文。 */
   const sup = (service: string, message: string): void =>
     log("supervisor", `[${service}] ${message}`);
+
+  function handleServiceFailure(
+    record: ServiceRecord,
+    detail: string,
+    reason: string,
+    code = 1,
+  ): boolean {
+    if (state.shuttingDown) return false;
+    if (!record.svc.required) {
+      sup(record.svc.name, `${detail}；可选服务已降级，继续监督其余服务`);
+      return true;
+    }
+    sup(record.svc.name, `${detail}；正在停止其余服务`);
+    void initiateShutdown({ code, reason });
+    return false;
+  }
 
   function sendSignal(record: ServiceRecord, signal: NodeJS.Signals, force = false): void {
     const { child } = record;
@@ -203,10 +223,7 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
       if (record.exited) return;
       record.exited = true;
       record.resolveExit();
-      sup(svc.name, `启动失败：${error.message}`);
-      if (!state.shuttingDown) {
-        void initiateShutdown({ code: 1, reason: `启动失败：${svc.name}` });
-      }
+      handleServiceFailure(record, `启动失败：${error.message}`, `启动失败：${svc.name}`);
     });
 
     child.on("exit", (code, signal) => {
@@ -222,9 +239,13 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
         return;
       }
 
-      sup(svc.name, `意外退出（${detail}），正在停止其余服务`);
       const exitCode = typeof code === "number" && code !== 0 ? code : 1;
-      void initiateShutdown({ code: exitCode, reason: `子进程退出：${svc.name}` });
+      handleServiceFailure(
+        record,
+        `意外退出（${detail}）`,
+        `子进程退出：${svc.name}`,
+        exitCode,
+      );
     });
 
     return record;
@@ -260,6 +281,16 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
     log("supervisor", `${remaining.length} 个进程未在 ${stopGraceMs}ms 内退出，强制结束进程树`);
     for (const record of remaining) sendSignal(record, "SIGKILL", true);
     await waitOrTimeout(Promise.all(remaining.map((record) => record.exitPromise)), 3000);
+  }
+
+  async function stopService(record: ServiceRecord): Promise<void> {
+    if (record.external || !record.child || record.exited) return;
+    sendSignal(record, "SIGTERM");
+    await waitOrTimeout(record.exitPromise, stopGraceMs);
+    if (!record.exited) {
+      sendSignal(record, "SIGKILL", true);
+      await waitOrTimeout(record.exitPromise, 3000);
+    }
   }
 
   async function initiateShutdown(options_: {
@@ -399,10 +430,17 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
     writePidFile(paths.supervisorPid, process.pid);
     pidWritten = true;
     installSignalHandlers();
+    abortHandler = (): void => {
+      log("supervisor", "收到外部停止请求");
+      void initiateShutdown({ code: 0, reason: "外部停止请求" });
+    };
+    if (shutdownSignal?.aborted) abortHandler();
+    else shutdownSignal?.addEventListener("abort", abortHandler, { once: true });
 
     log("supervisor", `项目根目录：${root}`);
     log("supervisor", `配置文件：${paths.launch}`);
     log("supervisor", `共 ${config.services.length} 个服务`);
+    let readyServices = 0;
 
     for (const svc of config.services) {
       if (state.shuttingDown) break;
@@ -423,6 +461,7 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
             resolveExit: () => {},
           });
           sup(svc.name, `已在运行（${svc.health}），跳过启动并纳入监督`);
+          readyServices += 1;
           continue;
         }
       }
@@ -444,14 +483,19 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
       const healthy = await waitForHealth(record, healthTimeoutMs, healthIntervalMs);
       if (!healthy) {
         if (state.shuttingDown) break;
-        sup(
-          svc.name,
+        const timedOut = handleServiceFailure(
+          record,
           `健康检查超时（${Math.round(healthTimeoutMs / 1000)} 秒）：${svc.health}`,
+          `健康检查超时：${svc.name}`,
         );
-        await initiateShutdown({ code: 1, reason: `健康检查超时：${svc.name}` });
+        if (timedOut) {
+          await stopService(record);
+          continue;
+        }
         break;
       }
       sup(svc.name, `健康检查通过：${svc.health}`);
+      readyServices += 1;
     }
 
     if (state.shuttingDown) {
@@ -465,7 +509,10 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
     if (config.services.length === 0) {
       log("supervisor", "没有需要启动的服务，仅保持前台监督；按 Ctrl+C 退出");
     } else {
-      log("supervisor", `全部 ${config.services.length} 个服务已就绪，进入监督模式`);
+      log(
+        "supervisor",
+        `${readyServices}/${config.services.length} 个服务健康，进入监督模式`,
+      );
     }
 
     await shutdownDone;
@@ -485,6 +532,7 @@ export async function runSupervisor(root: string, options: SupervisorOptions = {
     for (const { signal, handler } of signalHandlers) {
       process.off(signal, handler);
     }
+    if (abortHandler) shutdownSignal?.removeEventListener("abort", abortHandler);
     if (pidWritten) removePidFile(paths.supervisorPid);
     await logs.close();
   }

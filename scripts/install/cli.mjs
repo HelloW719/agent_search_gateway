@@ -336,6 +336,20 @@ async function waitHealth(url, timeoutMs = 60_000) {
   return false;
 }
 
+/** 自更新切换版本时只替换 gateway，保留现有 searxng / FlareSolverr 条目。 */
+export async function refreshLaunchWithGateway({ installRoot, gatewayLaunch }) {
+  const launchPath = path.join(installRoot, 'data', 'runtime', 'launch.json');
+  let existing = { services: [] };
+  try {
+    existing = JSON.parse(await fs.readFile(launchPath, 'utf8'));
+  } catch {
+    existing = { services: [] };
+  }
+  const services = (existing.services || []).filter((item) => item && item.name !== 'gateway');
+  services.push(gatewayLaunch);
+  return writeLaunchJson({ installRoot, services });
+}
+
 async function main(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   if (opts.help) {
@@ -374,16 +388,7 @@ async function main(argv = process.argv.slice(2)) {
   };
 
   if (opts.launchOnly) {
-    const launchPath = path.join(installRoot, 'data', 'runtime', 'launch.json');
-    let existing = { services: [] };
-    try {
-      existing = JSON.parse(await fs.readFile(launchPath, 'utf8'));
-    } catch {
-      existing = { services: [] };
-    }
-    const services = (existing.services || []).filter((item) => item && item.name !== 'gateway');
-    services.push(gatewayLaunch);
-    const launchFile = await writeLaunchJson({ installRoot, services });
+    const launchFile = await refreshLaunchWithGateway({ installRoot, gatewayLaunch });
     log(`已刷新启动清单: ${launchFile}`);
     return 0;
   }

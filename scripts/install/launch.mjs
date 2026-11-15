@@ -11,13 +11,21 @@ export async function writeLaunchJson({ installRoot, services }) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const payload = {
     generated_at: new Date().toISOString(),
-    services: services.filter(Boolean).map((item) => ({
-      name: item.name,
-      command: item.command,
-      cwd: item.cwd,
-      env: item.env || {},
-      health: item.health || null,
-    })),
+    services: services.filter(Boolean).map((item) => {
+      const service = {
+        name: item.name,
+        command: item.command,
+        cwd: item.cwd,
+        env: item.env || {},
+        health: item.health || null,
+      };
+      // 运行时解析器是 required 默认值的唯一来源。写入端只保留调用方
+      // 明确给出的值，避免 --launch-only 把旧清单的隐含默认写成 true。
+      if (item.required === true || item.required === false) {
+        service.required = item.required;
+      }
+      return service;
+    }),
   };
   const tmp = `${file}.tmp-${process.pid}`;
   await fs.writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
