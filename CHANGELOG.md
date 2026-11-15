@@ -2,6 +2,29 @@
 
 本项目遵循语义化版本，条目按版本倒序。
 
+## [0.3.6] - 2026-11-15
+
+### Added
+
+- 新增只读数据面命令 `asg search` / `asg fetch`：以 MCP 客户端调用运行中的网关，支持 `--json`（endpoint / 耗时 / 错误码 / 完整文本），不写配置、不重启服务。
+- `fetch` 新增 `render: auto | always | never`（默认 `auto`）：内容判空后自动升级浏览器渲染；`always` 强制，`never` 关闭。
+- `asg fetch` 新增 `--render`，`--json` 输出带本次渲染模式。
+- 新增 ADR-0020：按转换后的正文判断 JS 空壳，不再看 HTML 体积。
+
+### Changed
+
+- MCP `search` / `fetch` 失败时返回 `isError: true`；CLI 同时兼容旧网关的 `[SEARCH_*]` / `[FETCH_*]` 前缀。
+- fetch 的 JS 渲染判定改为“正文可见字符数 + script/SPA/noscript 特征”；大体积 SPA 空壳不再漏判。
+- JS 空壳优先本地 playwright，失败再 FlareSolverr；CF/403 仍保持 FlareSolverr 优先。
+- 误判时同时保留 direct 与渲染结果，按正文长度取更长者。
+- playwright 渲染改为 `commit` + 有界 `domcontentloaded` / `networkidle` + 正文轮询；并发渲染串行化，避免共享 page 互相导航。
+- `html2md` 把 `data:` URI 图片落盘为 `/files/<id>` 链接（单张 2MB、单次 10MB / 20 张），避免 base64 占满上下文或被当作正文。
+- README / CLI 契约补充 search / fetch 与 render 说明；ADR-0018 增加只读数据面例外。
+
+### Fixed
+
+- JS 渲染页面返回空字符串却 `exit 0`；现在渲染后仍无正文返回 `[FETCH_RENDER_FAIL]`。
+
 ## [0.3.4] - 2026-11-15
 
 ### Breaking
