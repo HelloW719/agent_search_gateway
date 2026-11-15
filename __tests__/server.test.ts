@@ -54,6 +54,29 @@ function parseMcpMessage(text: string): any {
   return JSON.parse(line ? line.slice("data: ".length) : text);
 }
 
+/**
+ * 发送未序列化的原始 body（模拟非法 JSON / 空 body）。
+ * 2 秒超时保证回归时测试失败而不是挂住整个用例。
+ */
+async function postRaw(
+  base: string,
+  raw: string,
+  opts: { token?: string; contentType?: string } = {},
+): Promise<{ status: number; body: any }> {
+  const headers: Record<string, string> = {
+    "Content-Type": opts.contentType ?? "application/json",
+    Accept: "application/json, text/event-stream",
+  };
+  if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
+  const res = await fetch(`${base}/mcp`, {
+    method: "POST",
+    headers,
+    body: raw,
+    signal: AbortSignal.timeout(2000),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
 describe("MCP HTTP server", () => {
   let base = "";
   let closeFn: (() => Promise<void>) | undefined;
@@ -331,6 +354,37 @@ describe("token 认证", () => {
       { token: "secret-token" },
     );
     expect(status).toBe(200);
+  });
+
+  it("非法 JSON body 立即返回 400 Parse error（不悬挂）", async () => {
+    const { status, body } = await postRaw(base, "{", { token: "secret-token" });
+    expect(status).toBe(400);
+    expect(body).toEqual({
+      jsonrpc: "2.0",
+      error: { code: -32700, message: "Parse error" },
+      id: null,
+    });
+  });
+
+  it("空 body 仍走 missing session 的 400（不变）", async () => {
+    const { status, body } = await postRaw(base, "", { token: "secret-token" });
+    expect(status).toBe(400);
+    expect(body).toEqual({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Bad Request: missing or invalid session" },
+      id: null,
+    });
+  });
+
+  it("超过 1MB 的 body 返回 413 Request body too large", async () => {
+    const big = `{"jsonrpc":"2.0","id":1,"method":"initialize","padding":"${"a".repeat(1024 * 1024)}"}`;
+    const { status, body } = await postRaw(base, big, { token: "secret-token" });
+    expect(status).toBe(413);
+    expect(body).toEqual({
+      jsonrpc: "2.0",
+      error: { code: -32600, message: "Request body too large" },
+      id: null,
+    });
   });
 });
 

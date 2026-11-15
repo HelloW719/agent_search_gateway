@@ -635,32 +635,75 @@ function isInitializeRequest(body: unknown): boolean {
 /** POST body 上限（MCP 请求都很小，1MB 足够；防超大 body 打满内存） */
 const MAX_BODY_BYTES = 1024 * 1024;
 
+/**
+ * readJsonBody 的失败原因：调用方据此选择 HTTP 状态码与 JSON-RPC 错误码。
+ * 内部类型，不对外暴露（startHttpServer / createServer 签名不变）。
+ */
+type BodyReadErrorKind = "invalid_json" | "too_large" | "read_error";
+
+class BodyReadError extends Error {
+  readonly kind: BodyReadErrorKind;
+
+  constructor(kind: BodyReadErrorKind, message: string) {
+    super(message);
+    this.name = "BodyReadError";
+    this.kind = kind;
+  }
+}
+
 function readJsonBody(req: import("node:http").IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let received = 0;
+    // 'end' 之后 'close' 也会触发，用它区分「已被读取失败」与「客户端中途断开」。
+    let settled = false;
+
+    const fail = (err: BodyReadError): void => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
     req.on("data", (c) => {
+      if (settled) return;
       received += (c as Buffer).byteLength;
       if (received > MAX_BODY_BYTES) {
-        req.destroy(); // 中断连接，不继续累积
-        reject(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`));
+        // 不再累积；暂停读取，让调用方先回 413 再结束连接（直接 destroy 会让响应写不出去）。
+        req.pause();
+        fail(new BodyReadError("too_large", `request body exceeds ${MAX_BODY_BYTES} bytes`));
         return;
       }
       chunks.push(c as Buffer);
     });
     req.on("end", () => {
+      if (settled) return;
       const raw = Buffer.concat(chunks).toString("utf-8");
       if (!raw) {
+        settled = true;
         resolve(undefined);
         return;
       }
       try {
-        resolve(JSON.parse(raw));
+        const parsed = JSON.parse(raw);
+        settled = true;
+        resolve(parsed);
       } catch {
-        reject(new Error("invalid JSON body"));
+        fail(new BodyReadError("invalid_json", "invalid JSON body"));
       }
     });
-    req.on("error", reject);
+    req.on("error", (err) => {
+      fail(new BodyReadError("read_error", err instanceof Error ? err.message : String(err)));
+    });
+    // 客户端未发完 body 就断开（典型：Content-Length 大于实际发送量）时不会再触发 end，
+    // 必须在这里收尾，否则 Promise 永不落定、请求悬挂。
+    req.on("aborted", () => {
+      fail(new BodyReadError("read_error", "request aborted before body end"));
+    });
+    req.on("close", () => {
+      if (!settled && !req.complete) {
+        fail(new BodyReadError("read_error", "request closed before body end"));
+      }
+    });
   });
 }
 
@@ -753,7 +796,40 @@ export async function startHttpServer(
 
     if (method === "POST") {
       const sessionId = (req.headers["mcp-session-id"] as string | undefined) ?? undefined;
-      const body = await readJsonBody(req);
+
+      // 读取失败必须就地回错误并结束：rejection 若继续向上冒泡会被进程级
+      // unhandledRejection 吞掉，请求永不返回、socket 泄漏。
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        const kind = err instanceof BodyReadError ? err.kind : "read_error";
+        if (kind === "too_large") {
+          writeJson(
+            res,
+            413,
+            { jsonrpc: "2.0", error: { code: -32600, message: "Request body too large" }, id: null },
+            { Connection: "close" },
+          );
+          // 继续读出并丢弃剩余数据：直接把 socket 掐掉会让客户端在读到 413 前遇到 RST。
+          // 不累积到内存，仅排空；卡住的连接由 requestTimeout 兜底。
+          req.resume();
+        } else if (kind === "invalid_json") {
+          writeJson(res, 400, {
+            jsonrpc: "2.0",
+            error: { code: -32700, message: "Parse error" },
+            id: null,
+          });
+        } else {
+          logger.warn(`read request body failed: ${err instanceof Error ? err.message : String(err)}`);
+          writeJson(res, 400, {
+            jsonrpc: "2.0",
+            error: { code: -32600, message: "Bad Request: cannot read request body" },
+            id: null,
+          });
+        }
+        return;
+      }
 
       let transport: StreamableHTTPServerTransport;
       let mcpServer: McpServer;
@@ -870,6 +946,12 @@ export async function startHttpServer(
 
     writeJson(res, 405, { error: "method not allowed" }, { Allow: "GET, POST, DELETE" });
   });
+
+  // 读取超时：requestTimeout 限制「收完整个请求」的时长，headersTimeout 限制头部到达；
+  // 这样 Content-Length 大于实际 body / 半开连接不会无限占用 socket。
+  // 注意：二者只作用于请求接收阶段，不影响 GET /mcp 的 SSE 长响应。
+  httpServer.requestTimeout = 30_000;
+  httpServer.headersTimeout = 10_000;
 
   await new Promise<void>((resolve, reject) => {
     httpServer.once("error", reject);
