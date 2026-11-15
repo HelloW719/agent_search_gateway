@@ -29,6 +29,14 @@ export { GATEWAY_VERSION };
 /** 进程启动时间：health.uptimeSec 按进程计算，而不是按 MCP 会话。 */
 const PROCESS_STARTED_AT = Date.now();
 
+/**
+ * 去掉终端转义序列（playwright / locator 报错里常带 \u001b[2m 等着色码），
+ * 避免把 ANSI 污染写进 agent 上下文。仅用于 browser_* 返回值包装。
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
 // 浏览器池全局单例（跨 MCP 会话共享，避免每个 session 各开浏览器进程）
 let sharedBrowserPool: BrowserPool | null = null;
 
@@ -504,9 +512,11 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
       content.push({ type: "image", data: r.screenshot.base64, mimeType: r.screenshot.mimeType });
     }
     if (r.error) {
-      content.push({ type: "text" as const, text: `错误：${r.error}` });
-    } else if (r.text) {
-      content.push({ type: "text" as const, text: r.text });
+      content.push({ type: "text" as const, text: `错误：${stripAnsi(r.error)}` });
+      return { content, isError: true };
+    }
+    if (r.text) {
+      content.push({ type: "text" as const, text: stripAnsi(r.text) });
     }
     return { content };
   };

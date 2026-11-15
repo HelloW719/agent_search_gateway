@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger } from "../src/logger.js";
-import { getFetchStore, startHttpServer } from "../src/server.js";
+import { getFetchStore, startHttpServer, stripAnsi } from "../src/server.js";
 import { createServer } from "../src/server.js";
 import type { Settings } from "../src/settings/index.js";
 import { deepMerge, makeSecrets, makeSettings, type DeepPartial } from "./helpers/settings.js";
@@ -169,6 +169,45 @@ describe("MCP HTTP server", () => {
     );
     expect(text).toContain("抓取失败");
     expect(parseMcpMessage(text).result.isError).toBe(true);
+  });
+
+  it("tools/call browser_navigate 失败时带 isError 且文本不含 ANSI", async () => {
+    const sessionId = await initSession(base);
+    const { text } = await mcpRequest(
+      base,
+      {
+        jsonrpc: "2.0",
+        id: 10,
+        method: "tools/call",
+        // SSRF 拒绝发生在启动浏览器之前，测试无需真实 chromium
+        params: { name: "browser_navigate", arguments: { url: "http://127.0.0.1/" } },
+      },
+      { sessionId },
+    );
+    const result = parseMcpMessage(text).result;
+    expect(result.isError).toBe(true);
+    const block = result.content.find((item: { type: string }) => item.type === "text");
+    expect(block.text).toContain("错误：");
+    expect(block.text).toContain("SSRF");
+    expect(block.text).not.toContain("\u001b");
+  });
+
+  it("browser_* 成功时不带 isError", async () => {
+    const sessionId = await initSession(base);
+    const { text } = await mcpRequest(
+      base,
+      { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "browser_close", arguments: {} } },
+      { sessionId },
+    );
+    const result = parseMcpMessage(text).result;
+    expect(result.isError ?? false).toBe(false);
+    expect(result.content[0].text).not.toContain("\u001b");
+  });
+
+  it("stripAnsi 清洗 playwright 错误里的 ANSI 转义", () => {
+    const raw = "\u001b[2m等待选择器超时\u001b[22m：\u001b[33mselector\u001b[39m 不可见";
+    expect(stripAnsi(raw)).toBe("等待选择器超时：selector 不可见");
+    expect(stripAnsi(raw)).not.toContain("\u001b");
   });
 
   it("GET /files/<id> 返回产物，未知 id 404", async () => {
