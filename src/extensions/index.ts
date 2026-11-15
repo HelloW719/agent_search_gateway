@@ -18,6 +18,7 @@ export {
   installExtension,
   isValidRepo,
   listExtensions,
+  loadInstalledManifest,
   parseChecksums,
   removeExtension,
   searchExtensions,

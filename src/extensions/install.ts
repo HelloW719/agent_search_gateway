@@ -580,6 +580,57 @@ export function listExtensions(root: string): InstalledExtension[] {
   return items.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/**
+ * 读取单个已安装插件的 manifest。
+ *
+ * 与 `listExtensions` 的区别是「单个目标」：未安装 / manifest 损坏 / 目录名不一致
+ * 都直接抛 CliError，供 `asg extensions config` 之类需要插件声明的命令使用。
+ */
+export function loadInstalledManifest(root: string, id: string): ExtensionManifest {
+  if (!isValidExtensionId(id)) {
+    throw new CliError("PLUGIN_FAILED", EXIT.INVALID, `插件 id 不合法：${id}`);
+  }
+
+  const dir = path.join(extensionsDir(root), id);
+  const manifestPath = path.join(dir, MANIFEST_FILE);
+
+  let text: string;
+  try {
+    text = fs.readFileSync(manifestPath, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new CliError("PLUGIN_UNKNOWN", EXIT.MISSING, `未安装插件：${id}`);
+    }
+    throw new CliError(
+      "PLUGIN_FAILED",
+      EXIT.INVALID,
+      `无法读取插件 manifest：${messageOf(error)}`,
+    );
+  }
+
+  let manifest: ExtensionManifest;
+  try {
+    manifest = parseManifest(text);
+  } catch (error) {
+    throw new CliError(
+      "PLUGIN_FAILED",
+      EXIT.INVALID,
+      `插件 manifest 校验失败：${messageOf(error)}`,
+    );
+  }
+
+  if (manifest.id !== id) {
+    throw new CliError(
+      "PLUGIN_FAILED",
+      EXIT.INVALID,
+      `目录名 ${id} 与 manifest.id ${manifest.id} 不一致`,
+    );
+  }
+
+  return manifest;
+}
+
 /** 卸载第三方插件：只删 data/extensions/<id>，不触碰网关配置。 */
 export async function removeExtension(
   root: string,
