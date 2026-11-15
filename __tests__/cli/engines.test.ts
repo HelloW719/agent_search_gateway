@@ -122,6 +122,7 @@ function writeSearchExtension(
       "  routing: () => ['category:demo'],",
       "  available: () => true,",
       "  enabled: () => true,",
+      `  enabledPath: ["extensions", ${JSON.stringify(options.dir)}, "config", "enabled"],`,
       ...(requires ? [requires.trimEnd()] : []),
       "  runtime: {",
       '    kind: "search",',
@@ -788,6 +789,92 @@ describe("engines route", () => {
 
     expect(read(root, "gateway.yaml")).toBe(before);
     expect(restartCalls).toHaveLength(0);
+  });
+});
+
+describe("第三方扩展密钥键（manifest id / engineId）", () => {
+  const ENV_KEY = "ASG_TEST_DEMO_COOKIE";
+
+  function writeExtensionSecrets(root: string, lines: string[]): void {
+    write(path.join(root, "secrets.yaml"), ["extensions:", ...lines, ""].join("\n"));
+  }
+
+  afterEach(() => {
+    delete process.env[ENV_KEY];
+  });
+
+  it("manifest id 键 + env: 解析非空时满足 secret: 依赖，record 带 pluginId", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, {
+      dir: "demo-search",
+      name: "demo",
+      requires: ["secret:cookie"],
+    });
+    writeExtensionSecrets(root, ["  demo-search:", `    cookie: env:${ENV_KEY}`]);
+    process.env[ENV_KEY] = "cookie-value";
+
+    const result = await enginesRun({
+      root,
+      reporter,
+      rest: ["enable", "gateway.search:demo"],
+    });
+
+    expect(result.data).toMatchObject({ changed: ["gateway.search:demo"] });
+    const record = readLocalEngines(root).find((engine) => engine.id === "gateway.search:demo")!;
+    expect(record.pluginId).toBe("demo-search");
+  });
+
+  it("manifest id 键的 env: 解析为空时仍报缺少密钥", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, {
+      dir: "demo-search",
+      name: "demo",
+      requires: ["secret:cookie"],
+    });
+    writeExtensionSecrets(root, ["  demo-search:", `    cookie: env:${ENV_KEY}`]);
+    process.env[ENV_KEY] = "";
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["enable", "gateway.search:demo"] }),
+    ).rejects.toMatchObject({ code: "MISSING_SECRET", exitCode: 4 });
+    expect(restartCalls).toHaveLength(0);
+  });
+
+  it("旧 engineId 键仍满足 secret: 依赖", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, {
+      dir: "demo-search",
+      name: "demo",
+      requires: ["secret:cookie"],
+    });
+    writeExtensionSecrets(root, [
+      `  ${JSON.stringify("gateway.search:demo")}:`,
+      "    cookie: legacy-cookie",
+    ]);
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["enable", "gateway.search:demo"] }),
+    ).resolves.toMatchObject({ data: { changed: ["gateway.search:demo"] } });
+  });
+
+  it("manifest id 键为空时回退旧 engineId 键", async () => {
+    const root = makeRoot();
+    writeSearchExtension(root, {
+      dir: "demo-search",
+      name: "demo",
+      requires: ["secret:cookie"],
+    });
+    writeExtensionSecrets(root, [
+      "  demo-search:",
+      `    cookie: env:${ENV_KEY}`,
+      `  ${JSON.stringify("gateway.search:demo")}:`,
+      "    cookie: legacy-cookie",
+    ]);
+    process.env[ENV_KEY] = "";
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["enable", "gateway.search:demo"] }),
+    ).resolves.toMatchObject({ data: { changed: ["gateway.search:demo"] } });
   });
 });
 

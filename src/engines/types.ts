@@ -15,6 +15,8 @@ export type EngineGroup = "searxng" | "gateway.reverse_image" | "gateway.search"
 export interface EngineRecord {
   /** `${group}:${name}` */
   id: string;
+  /** 第三方 search 插件的 manifest id；内置引擎不设置。 */
+  pluginId?: string;
   group: EngineGroup;
   name: string;
   kind: EngineKind;

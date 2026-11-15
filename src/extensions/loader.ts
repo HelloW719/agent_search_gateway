@@ -114,6 +114,8 @@ function toEngineProvider(manifest: ExtensionManifest, raw: Record<string, unkno
 
   return {
     ...(raw as unknown as EngineProvider),
+    // manifest id 是密钥/配置的规范键前缀；放在 spread 之后，防止入口导出伪造。
+    pluginId: manifest.id,
     kind: raw.kind === "searxng" ? "searxng" : "gateway",
     displayName: nonEmptyString(raw.displayName) ? raw.displayName : manifest.name,
     routing: typeof raw.routing === "function" ? (raw.routing as EngineProvider["routing"]) : () => [],

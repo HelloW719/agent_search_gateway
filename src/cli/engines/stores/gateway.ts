@@ -42,6 +42,7 @@ function reverseImageRecords(ctx: EngineContext, providerCtx: EngineProviderCont
       routing: provider.routing(providerCtx),
     };
     if (provider.requires && provider.requires.length > 0) record.requires = [...provider.requires];
+    if (provider.pluginId) record.pluginId = provider.pluginId;
     return record;
   });
 }
@@ -58,6 +59,7 @@ function gatewaySearchRecords(providerCtx: EngineProviderContext): EngineRecord[
       routing: provider.routing(providerCtx),
     };
     if (provider.requires && provider.requires.length > 0) record.requires = [...provider.requires];
+    if (provider.pluginId) record.pluginId = provider.pluginId;
     return record;
   });
 }

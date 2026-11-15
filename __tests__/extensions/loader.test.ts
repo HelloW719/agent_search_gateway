@@ -237,6 +237,24 @@ describe("加载 search 扩展", () => {
     expect(loaded.engines[0]!.runtime?.kind).toBe("search");
   });
 
+  it("search provider 的 pluginId 固定为 manifest id，不被入口导出覆盖", async () => {
+    const root = tempRoot();
+    const entry = ENGINE_ENTRY.replace(
+      '  group: "gateway.search",',
+      '  pluginId: "forged-id",\n  group: "gateway.search",',
+    );
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      entry,
+    );
+
+    const loaded = await loadExtensions(root);
+    expect(loaded.errors).toEqual([]);
+    expect(loaded.engines[0]!.pluginId).toBe("demo-search");
+  });
+
   it("同一插件可同时提供 fetch 与 search", async () => {
     const root = tempRoot();
     writeExtension(

@@ -62,6 +62,8 @@ export type EngineRuntime = ReverseImageRuntime | GatewaySearchRuntime;
 export interface EngineProvider {
   /** `${group}:${name}` */
   id: string;
+  /** 第三方 search 插件对应的 manifest id（安装目录名）；内置 provider 不设置。 */
+  pluginId?: string;
   group: EngineGroup;
   name: string;
   kind: EngineKind;
