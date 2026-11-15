@@ -80,13 +80,46 @@ const ENABLED_ENGINES_TTL_MS = 60_000;
 /** 配额台账读取缓存时长；较短以便快速感知插件侧的计数变化。 */
 const QUOTA_LEDGER_TTL_MS = 10_000;
 
-/** 解析逗号分隔的引擎列表。 */
-function parseEngineList(value: string | undefined): string[] {
+/** 解析逗号分隔的 engines / categories（保留原始大小写；比较时再逐项小写）。 */
+function splitList(value: string | undefined): string[] {
   if (!value) return [];
   return value
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * 网关自管类别（小写）：反向图搜类别（来自配置，不写死）+ 已注册 `gateway.search`
+ * provider 通过 `routing()` 声明的类别。
+ *
+ * 每次搜索现取，不做跨调用缓存：扩展在进程启动时装载，缓存会带来测试间/热重载污染。
+ * 单个 provider 的 `routing()` 抛错只跳过它（打 debug），不能影响搜索本身。
+ */
+function collectGatewayCategories(
+  search: SearchSettings,
+  ctx: EngineProviderContext,
+  logger: Logger,
+): Set<string> {
+  const cats = new Set<string>();
+  const reverseCategory = (search.reverse_image.category ?? "").trim().toLowerCase();
+  if (reverseCategory) cats.add(reverseCategory);
+  for (const p of providersForGroup("gateway.search")) {
+    try {
+      for (const c of p.routing(ctx)) {
+        const name = c.trim().toLowerCase();
+        if (name) cats.add(name);
+      }
+    } catch (err) {
+      logger.debug(`gateway.search provider ${p.id} routing failed: ${String(err)}`);
+    }
+  }
+  return cats;
+}
+
+/** 可用引擎示例（按 /config 顺序取前 5 个，避免提示过长）。 */
+function availableEngineSample(engines: Set<string>): string {
+  return [...engines].slice(0, 5).join(", ");
 }
 
 /** 校验并规整台账 JSON；结构非法时返回 undefined（调用方优雅降级）。 */
@@ -255,7 +288,7 @@ export function planEngineBatches(
   enabled: Set<string> | undefined,
   quota: QuotaLedger | undefined,
 ): EngineBatch[] {
-  const explicit = parseEngineList(params.engines);
+  const explicit = splitList(params.engines);
   if (explicit.length > 0) {
     const usable = quota ? explicit.filter((e) => !isExhausted(quota[e])) : explicit;
     // 显式 engines：单批、无 rotating 子集概念 → 非空即止（旧行为）
@@ -410,27 +443,37 @@ function cacheKey(params: SearchParams, batches: string[], semanticTag = ""): st
 }
 
 /**
- * 加载 searxng 已启用的引擎集合（`GET /config`）。
- * 失败时返回 undefined（调用方退化为「不剔除」），并做短期负缓存避免反复打网络。
+ * 加载 searxng `/config`（已启用引擎 + 类别声明），一次请求供两处校验/筛选复用。
+ * 失败时返回 undefined（调用方退化为「不校验/不剔除」），并做短期负缓存避免反复打网络。
  */
-function createEnabledEnginesLoader(searxngUrl: string, logger: Logger) {
-  let cached: { at: number; set: Set<string> | undefined } | undefined;
-  return async (): Promise<Set<string> | undefined> => {
+function createSearxngConfigLoader(searxngUrl: string, logger: Logger) {
+  let cached: { at: number; config: SearxngConfigSnapshot | undefined } | undefined;
+  return async (): Promise<SearxngConfigSnapshot | undefined> => {
     const now = Date.now();
-    if (cached && now - cached.at < ENABLED_ENGINES_TTL_MS) return cached.set;
+    if (cached && now - cached.at < ENABLED_ENGINES_TTL_MS) return cached.config;
     try {
       const res = await fetch(`${searxngUrl}/config`, { signal: AbortSignal.timeout(3000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as { engines?: Array<{ name?: string; enabled?: boolean }> };
-      const set = new Set<string>();
+      const data = (await res.json()) as {
+        engines?: Array<{ name?: string; enabled?: boolean }>;
+        categories?: unknown;
+      };
+      const engines = new Set<string>();
       for (const e of data.engines ?? []) {
-        if (e.name && e.enabled) set.add(e.name);
+        if (e.name && e.enabled) engines.add(e.name);
       }
-      cached = { at: now, set };
-      return set;
+      const categories = new Set<string>();
+      if (Array.isArray(data.categories)) {
+        for (const c of data.categories) {
+          if (typeof c === "string" && c.length > 0) categories.add(c);
+        }
+      }
+      const config: SearxngConfigSnapshot = { engines, categories };
+      cached = { at: now, config };
+      return config;
     } catch (err) {
       logger.debug(`enabled engines fetch failed: ${String(err)}`);
-      cached = { at: now, set: undefined };
+      cached = { at: now, config: undefined };
       return undefined;
     }
   };
@@ -460,6 +503,88 @@ function createQuotaLoader(search: SearchSettings, logger: Logger) {
   };
 }
 
+/** searxng `/config` 里与参数校验相关的部分（一次请求同时供引擎与类别使用）。 */
+export interface SearxngConfigSnapshot {
+  /** 已启用的引擎名；可能为空集合（实例没有启用任何引擎）。 */
+  engines: Set<string>;
+  /** searxng 声明的类别；`/config` 未给出时为空集合。 */
+  categories: Set<string>;
+}
+
+/**
+ * 校验显式 `engines` 是否可用（复用 `/config` 快照，不额外发请求）。
+ *
+ * 只在 `/config` 成功且引擎集合非空时校验：取不到（网络失败/空响应）时返回
+ * undefined 保持旧行为，避免把网关自身的网络问题误报成用户参数错误。
+ */
+export function validateExplicitFilters(
+  params: SearchParams,
+  config: SearxngConfigSnapshot | undefined,
+): SearchOutcome | undefined {
+  if (!config) return undefined;
+
+  const engines = splitList(params.engines);
+  if (engines.length > 0 && config.engines.size > 0) {
+    if (!engines.some((e) => config.engines.has(e))) {
+      return {
+        ok: false,
+        code: ErrorCodes.SEARCH_INVALID,
+        text: withCode(
+          ErrorCodes.SEARCH_INVALID,
+          `指定引擎不可用：${engines.join(", ")}。当前可用：${availableEngineSample(config.engines)}`,
+        ),
+      };
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * 未在 searxng `/config` 或网关 provider 中声明的类别：照常搜索，只在结果末尾提示。
+ * 不硬拒绝——searxng 的 `/config` 只列 tab 类（如 `other` 不在其中），硬判会误杀。
+ */
+export function unknownCategoryNote(
+  params: SearchParams,
+  config: SearxngConfigSnapshot | undefined,
+  gatewayCategories: ReadonlySet<string> | undefined,
+): string | undefined {
+  if (!config || config.categories.size === 0) return undefined;
+  const known = new Set([...config.categories].map((c) => c.toLowerCase()));
+  for (const c of gatewayCategories ?? []) known.add(c.toLowerCase());
+  const unknown = splitList(params.categories).filter((c) => !known.has(c.toLowerCase()));
+  if (unknown.length === 0) return undefined;
+  return `> 注：类别 ${unknown.join(", ")} 未被 searxng 声明，已按普通搜索处理；若为扩展类别，请先安装对应扩展。`;
+}
+
+/**
+ * 显式过滤（engines/categories）且 0 结果时的提示。
+ * 静默返回 0 条容易被误读成「确实没有匹配」，这里点明过滤条件与常见原因。
+ */
+export function zeroResultFilterNote(params: SearchParams): string | undefined {
+  const parts: string[] = [];
+  const engines = splitList(params.engines);
+  const categories = splitList(params.categories);
+  if (engines.length > 0) parts.push(`engines=${engines.join(",")}`);
+  if (categories.length > 0) parts.push(`categories=${categories.join(",")}`);
+  if (parts.length === 0) return undefined;
+  return `> 注：已按 ${parts.join(" / ")} 过滤；0 结果可能是该来源未启用或无匹配。`;
+}
+
+/**
+ * query 里给出的图源地址是否可用：`new URL` 能解析且协议是 http/https。
+ * `extractImageUrl` 只按 `https?://` 抠串，`https://` 这类残串仍会命中，故需再验一次。
+ */
+function isHttpUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /** createSearchService 所需设置切片 + 密钥。 */
 export interface SearchSettingsDeps {
   search: SearchSettings;
@@ -484,7 +609,7 @@ export function createSearchService(
   const cache = new StringCache(search.cache_max_entries, search.cache_ttl_ms);
   const sem = new Semaphore(search.max_concurrent);
   const resolveDomainFilter = typeof domainFilter === "function" ? domainFilter : () => domainFilter;
-  const getEnabledEngines = createEnabledEnginesLoader(searxng.url, logger);
+  const getSearxngConfig = createSearxngConfigLoader(searxng.url, logger);
   const getQuota = createQuotaLoader(search, logger);
   const provider = searchDeps.embeddingProvider ?? null;
   const corpus = searchDeps.corpus ?? null;
@@ -663,7 +788,16 @@ export function createSearchService(
       }
     }
 
-    const enabled = await getEnabledEngines();
+    const searxngConfig = await getSearxngConfig();
+    const enabled = searxngConfig?.engines;
+    // 显式 engines/categories 与 /config 不符 → 参数错误（取不到配置时保持旧行为）。
+    // 网关自管类别按当前已注册 provider 动态收集，只有请求确实带类别时才调用 routing()。
+    const gatewayCategories =
+      splitList(effParams.categories).length > 0
+        ? collectGatewayCategories(search, providerCtx, logger)
+        : undefined;
+    const invalid = validateExplicitFilters(effParams, searxngConfig);
+    if (invalid) return invalid;
     const quota = await getQuota();
     const batches = planEngineBatches(effParams, search, enabled, quota);
     // 单一上限（search.max_results_cap）：agent 请求超过即按上限截断，不报错；
@@ -946,7 +1080,12 @@ export function createSearchService(
         availableCount: candidateCount,
       });
       // 反向图搜的降级/无匹配提示（只在该路径下出现，正常搜索逐字不变）
-      const text = notes.length > 0 ? `${rendered}\n\n${notes.map((n) => `> ${n}`).join("\n>\n")}` : rendered;
+      let text = notes.length > 0 ? `${rendered}\n\n${notes.map((n) => `> ${n}`).join("\n>\n")}` : rendered;
+      // 显式过滤且最终 0 条：补一句说明，避免被误读成「确实没有匹配」
+      const filterNote = ranked.length === 0 ? zeroResultFilterNote(effParams) : undefined;
+      if (filterNote) text = `${text}\n\n${filterNote}`;
+      const categoryNote = unknownCategoryNote(effParams, searxngConfig, gatewayCategories);
+      if (categoryNote) text = `${text}\n\n${categoryNote}`;
       const renderMs = performance.now() - tRender;
 
       const totalMs = performance.now() - tStart;
