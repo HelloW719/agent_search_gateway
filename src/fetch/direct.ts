@@ -322,6 +322,19 @@ export async function directFetch(
       status = res.status;
       contentType = res.headers.get("content-type") ?? "";
 
+      // 304 只应出现在带条件请求的场景；本网关不发 If-None-Match/If-Modified-Since，
+      // 遇到即视为异常，不能落进下面的 3xx 分支报“重定向无 location”。
+      if (status === 304) {
+        return {
+          ok: false,
+          errorKind: "http",
+          status,
+          contentType,
+          finalUrl: currentUrl.toString(),
+          errorMessage: "HTTP 304（无缓存协商时不应出现）",
+        };
+      }
+
       // 重定向：先校验目标协议/内网，再继续（防 SSRF 跳板）
       if (status >= 300 && status < 400) {
         const loc = res.headers.get("location");
@@ -348,6 +361,18 @@ export async function directFetch(
 
       if (status < 200 || status >= 300) {
         return { ok: false, errorKind: "http", status, errorMessage: `HTTP ${status}` };
+      }
+
+      // 204/205 按规范无响应体：交给 service 按“成功空响应”给出明确提示，而不是报 empty。
+      if (status === 204 || status === 205) {
+        return {
+          ok: true,
+          status,
+          contentType,
+          finalUrl: currentUrl.toString(),
+          kind: "text",
+          text: "",
+        };
       }
 
       const categorized = classifyContentType(contentType);

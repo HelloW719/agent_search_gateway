@@ -15,6 +15,8 @@ export const ErrorCodes = {
   /** 文件超过 fetch.max_download_bytes 上限。 */
   FETCH_TOO_LARGE: "FETCH_TOO_LARGE",
   FETCH_RENDER_FAIL: "FETCH_RENDER_FAIL",
+  /** 目标站返回非 2xx（4xx/5xx/304/重定向超限）；429 可稍后重试，其余通常不可重试。 */
+  FETCH_HTTP_STATUS: "FETCH_HTTP_STATUS",
   FETCH_NETWORK: "FETCH_NETWORK",
   FETCH_INVALID_URL: "FETCH_INVALID_URL",
   // bilibili（fetch 插件的专用错误码，避免被包成 FETCH_NETWORK）

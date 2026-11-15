@@ -202,6 +202,12 @@ export function createFetchService(
       lines.push(`> 注：响应体超过 ${(fetchSettings.max_bytes / 1024 / 1024).toFixed(1)}MB，内容已截断。`);
     }
     const full = lines.join("\n");
+    // 204/205 等空响应体：ok=true 但绝不能返回空字符串，否则 agent 会以为没拿到内容。
+    if (full.trim() === "") {
+      logger.debug(`fetch empty body (${base || "unknown"}): ${url}`);
+      const detail = direct.status !== undefined ? `；HTTP ${direct.status}` : "";
+      return { ok: true, text: `（响应体为空${detail}）` };
+    }
     // 插件结果不进缓存：评论/直链这类产物会随调用变化，缓存会让续传和直链刷新失效。
     if (!direct.plugin) cachedSet("direct", url, full, maxChars);
     logger.debug(`fetch done (${base}): ${url} (${full.length} chars)`);
@@ -414,6 +420,7 @@ export function createFetchService(
       else if (direct.errorKind === "too_large") code = ErrorCodes.FETCH_TOO_LARGE;
       else if (direct.errorKind === "timeout") code = ErrorCodes.FETCH_TIMEOUT;
       else if (direct.errorKind === "invalid_url") code = ErrorCodes.FETCH_INVALID_URL;
+      else if (direct.errorKind === "http" && direct.status !== undefined) code = ErrorCodes.FETCH_HTTP_STATUS;
 
       let hint = "";
       if (direct.errorKind === "too_large") {

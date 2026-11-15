@@ -55,6 +55,15 @@ beforeAll(async () => {
     } else if (url.pathname === "/error") {
       res.writeHead(500, { "Content-Type": "text/html" });
       res.end("<html>error</html>");
+    } else if (url.pathname === "/not-found") {
+      res.writeHead(404, { "Content-Type": "text/html" });
+      res.end("<html>not found</html>");
+    } else if (url.pathname === "/not-modified") {
+      res.writeHead(304);
+      res.end();
+    } else if (url.pathname === "/empty-204") {
+      res.writeHead(204);
+      res.end();
     } else if (url.pathname === "/gbk") {
       // header 不带 charset，只在 <meta> 声明 GBK（老中文站常见）
       res.writeHead(200, { "Content-Type": "text/html" });
@@ -141,6 +150,30 @@ describe("directFetch", () => {
     expect(r.ok).toBe(false);
     expect(r.errorKind).toBe("http");
     expect(r.status).toBe(500);
+  });
+
+  it("404 返回 http", async () => {
+    const r = await directFetch(makeConfig(), `${base}/not-found`);
+    expect(r.ok).toBe(false);
+    expect(r.errorKind).toBe("http");
+    expect(r.status).toBe(404);
+  });
+
+  it("304 走 http 分支，不报“重定向无 location”", async () => {
+    const r = await directFetch(makeConfig(), `${base}/not-modified`);
+    expect(r.ok).toBe(false);
+    expect(r.errorKind).toBe("http");
+    expect(r.status).toBe(304);
+    expect(r.errorMessage).toContain("304");
+    expect(r.errorMessage).not.toContain("重定向无 location");
+  });
+
+  it("204 返回成功空响应", async () => {
+    const r = await directFetch(makeConfig(), `${base}/empty-204`);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(204);
+    expect(r.kind).toBe("text");
+    expect(r.text).toBe("");
   });
 
   it("超大响应截断并标记 truncated", async () => {

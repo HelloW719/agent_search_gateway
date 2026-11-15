@@ -184,14 +184,51 @@ describe("createFetchService 路由", () => {
     expect(fsCalled).toBe(before + 1);
   });
 
-  it("404 → 不升级，返回 direct 错误", async () => {
+  it("404 → 不升级，返回 FETCH_HTTP_STATUS", async () => {
     const cfg = makeConfig({ flaresolverr: { url: fsBase } });
     const svc = createFetchService(cfg, silentLogger);
     const before = fsCalled;
     const r = await svc.fetch({ url: `${targetBase}/missing404` });
     expect(r.ok).toBe(false);
     expect(fsCalled).toBe(before); // 未调用 FlareSolverr
-    expect(r.text).toContain("抓取失败");
+    if (!r.ok) {
+      expect(r.code).toBe("FETCH_HTTP_STATUS");
+      expect(r.text).toContain("HTTP 404");
+    }
+  });
+
+  it("500 → 不升级，返回 FETCH_HTTP_STATUS", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const svc = createFetchService(cfg, silentLogger);
+    const before = fsCalled;
+    const r = await svc.fetch({ url: `${targetBase}/status500` });
+    expect(r.ok).toBe(false);
+    expect(fsCalled).toBe(before);
+    if (!r.ok) {
+      expect(r.code).toBe("FETCH_HTTP_STATUS");
+      expect(r.text).toContain("HTTP 500");
+    }
+  });
+
+  it("304 → 返回 FETCH_HTTP_STATUS，不再报“重定向无 location”", async () => {
+    const svc = createFetchService(makeConfig(), silentLogger);
+    const r = await svc.fetch({ url: `${targetBase}/status304` });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("FETCH_HTTP_STATUS");
+      expect(r.text).toContain("304");
+      expect(r.text).not.toContain("重定向无 location");
+    }
+  });
+
+  it("204 → ok=true 且给出空响应体提示（不是空字符串）", async () => {
+    const svc = createFetchService(makeConfig(), silentLogger);
+    const r = await svc.fetch({ url: `${targetBase}/empty204` });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.text.trim().length).toBeGreaterThan(0);
+      expect(r.text).toContain("响应体为空");
+    }
   });
 
   it("flaresolverr.enabled=false → 403 不升级，返回 direct 错误", async () => {

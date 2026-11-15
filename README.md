@@ -56,6 +56,7 @@ gateway (本服务, :3000/mcp)
 | `FETCH_UNSUPPORTED_TYPE` | 产物无法处理（如未启用落盘又拿到二进制） | 放弃 |
 | `FETCH_TOO_LARGE` | 文件超过 `fetch.max_download_bytes`（默认 1GB） | 调大上限或放弃 |
 | `FETCH_RENDER_FAIL` | 浏览器渲染失败 | 可重试 |
+| `FETCH_HTTP_STATUS` | 目标站返回非 2xx（4xx/5xx/304/重定向超限） | 429 可稍后重试，其余通常放弃 |
 | `FETCH_NETWORK` | 网络错误 | 可重试 |
 | `FETCH_INVALID_URL` | 非法 URL | 放弃 |
 | `BROWSER_UNAVAILABLE` | 浏览器未启用 | 检查配置 |
