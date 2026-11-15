@@ -525,14 +525,14 @@ describe("createSearchService 反向图搜扇出（ADR-0010）", () => {
     expect(lastTraceQuery).toBeUndefined();
   });
 
-  it("query 里没有图片 URL → 跳过网关侧图源，并附提示", async () => {
+  it("query 为空（没给图）→ 跳过网关侧图源，并附提示", async () => {
     traceMode = "ok";
     searxFail = false;
     searxCategories = [];
     searxResults = [];
     lastTraceQuery = undefined;
     const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
-    const r = await svc.search({ query: "只有文字没有图片", categories: "search_by_image" });
+    const r = await svc.search({ query: "", categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(lastTraceQuery).toBeUndefined();
     expect(r.text).toContain("query 里没有图片 URL");
@@ -725,6 +725,73 @@ describe("createSearchService 本地图片（image_path）", () => {
     expect(a.cacheHit).toBe(false);
     expect(b.cacheHit).toBe(false);
     expect(publishCalls).toBe(2); // 每次都真跑
+  });
+});
+
+// ── 以图搜图参数校验：query 必须是图片 URL，或另给 image_path ──
+
+describe("createSearchService 以图搜图参数校验", () => {
+  let dir = "";
+  let imgPath = "";
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "revimg-validate-"));
+    imgPath = join(dir, "shot.jpg");
+    await writeFile(imgPath, LOCAL_JPEG);
+  });
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const reset = () => {
+    traceMode = "ok";
+    publishMode = "ok";
+    searxFail = false;
+    searxCategories = [];
+    searxEngines = [];
+    searxQueries = [];
+    searxResults = [];
+    publishBody = "";
+    publishCalls = 0;
+    lastTraceMethod = "";
+    lastTraceQuery = undefined;
+  };
+
+  it("query 不是图片 URL（且没给 image_path）→ 参数错误，不再静默降级", async () => {
+    reset();
+    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    const r = await svc.search({ query: "not-a-url", categories: "search_by_image" });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe("SEARCH_INVALID");
+    expect(r.text).toContain("图片 URL");
+    expect(r.text).toContain("categories=general");
+    // 参数不合法 → 不请求 searxng、也不打图源
+    expect(searxQueries).toEqual([]);
+    expect(lastTraceMethod).toBe("");
+    expect(publishCalls).toBe(0);
+  });
+
+  it("query 是 http(s) 图片 URL → 不报参数错误，照常走图源", async () => {
+    reset();
+    searxResults = [];
+    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    const r = await svc.search({ query: "https://example.com/x.png", categories: "search_by_image" });
+    expect(r.ok).toBe(true);
+    expect(r.text).not.toContain("当前 query 不是图片 URL");
+    // searxng（tineye）与网关侧图源都用同一个 query URL；无结果属于正常情况
+    expect(searxQueries).toEqual(["https://example.com/x.png"]);
+    expect(lastTraceQuery?.get("url")).toBe("https://example.com/x.png");
+  });
+
+  it("给了 image_path（文件存在）→ 不受 URL 校验影响，照常直传", async () => {
+    reset();
+    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    const r = await svc.search({ query: "not-a-url", imagePath: imgPath, categories: "search_by_image" });
+    expect(r.ok).toBe(true);
+    expect(r.text).not.toContain("当前 query 不是图片 URL");
+    expect(lastTraceMethod).toBe("POST"); // 本地图 multipart 直传
+    expect(publishCalls).toBe(1);
   });
 });
 

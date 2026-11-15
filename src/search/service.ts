@@ -774,8 +774,25 @@ export function createSearchService(
         ),
       };
     }
+    // 以图搜图但既没有 image_path、query 也不是可用图片 URL：
+    // 继续往下会静默降级成普通网页搜索（返回一堆百科/网页结果），这里显式报参数错误。
+    // query 为空（只靠 image_path 或纯提示）保持既有「已跳过图源」分支，不在这里拦。
+    const reverseIntent = reverseImage || isReverseImageQuery(effParams.categories, reverseCategory);
+    if (reverseIntent && !imagePath) {
+      const queryText = (effParams.query ?? "").trim();
+      if (queryText !== "" && !isHttpUrl(imageUrl ?? queryText)) {
+        return {
+          ok: false,
+          code: ErrorCodes.SEARCH_INVALID,
+          text: withCode(
+            ErrorCodes.SEARCH_INVALID,
+            "以图搜图需要一个图片 URL 或 image_path（当前 query 不是图片 URL）。请把图片地址直接作为 query，或改用 categories=general 做普通网页搜索。",
+          ),
+        };
+      }
+    }
     // 网关侧文本源（ADR-0014）：类别命中即走 provider，完全不请求 searxng。
-    // 注意顺序：在 getEnabledEngines() 之前返回，避免为文本源查询白打一次 searxng /config。
+    // 注意顺序：在 getSearxngConfig() 之前返回，避免为文本源查询白打一次 searxng /config。
     if (!reverseImage) {
       for (const p of providersForGroup("gateway.search")) {
         const runtime = p.runtime;
