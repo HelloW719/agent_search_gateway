@@ -36,16 +36,26 @@ export function parseOptions(rest: string[], valueFlags: readonly string[]): Par
       const eq = arg.indexOf("=");
       const name = eq === -1 ? arg : arg.slice(0, eq);
       if (!allowed.has(name)) usage(`未知选项：${name}`);
+      // 重复指定同一选项时不要静默“后者覆盖”，直接报用法错误（`--name=a --name=b` 与 `--name a --name b` 一致）。
+      if (values[name] !== undefined) usage(`${name} 只能指定一次`);
       const inline = eq === -1 ? undefined : arg.slice(eq + 1);
       if (inline !== undefined) {
         values[name] = inline;
         continue;
       }
       const value = rest[i + 1];
-      if (value === undefined) usage(`${name} 需要一个值`);
+      // 下一个 token 是另一个选项时视为缺值，避免把它吞成当前选项的值。
+      if (value === undefined || (value.startsWith("--") && value !== "--")) {
+        usage(`${name} 需要一个值`);
+      }
       values[name] = value;
       i += 1;
       continue;
+    }
+
+    // 单横线短选项（如 -x）没有定义，一律当拼错报错；纯 `-` 是 stdin 约定，保留为位置参数。
+    if (!endOfOptions && arg.startsWith("-") && arg.length > 1) {
+      usage(`未知选项：${arg}`);
     }
 
     positionals.push(arg);

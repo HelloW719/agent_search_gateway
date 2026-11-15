@@ -269,6 +269,101 @@ describe("asg search / fetch 数据面命令", () => {
     expect(lastCall).toEqual({ tool: "search", args: { query: "hello --world" } });
   });
 
+  it("下一个 token 是选项时报告真正缺值的选项", async () => {
+    const root = makeRoot();
+    await expect(
+      asFetch(root, ["https://example.com/a", "--render", "--max-chars", "100"]),
+    ).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("--render 需要一个值"),
+    });
+    await expect(
+      asSearch(root, ["x", "--categories", "--engines", "bing"]),
+    ).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("--categories 需要一个值"),
+    });
+  });
+
+  it("单横线负值仍作为选项值，交给范围校验", async () => {
+    const root = makeRoot();
+    await expect(asFetch(root, ["https://example.com/a", "--max-chars", "-5"])).rejects.toMatchObject({
+      exitCode: 2,
+      message: expect.stringContaining("--max-chars 需要 1-200000"),
+    });
+  });
+
+  it("fetch 的 -- 之后 URL 仍作为位置参数", async () => {
+    const root = makeRoot();
+    const result = await asFetch(root, ["--", "https://example.com/a"]);
+    expect(JSON.parse((result.data as any).text)).toEqual({ url: "https://example.com/a" });
+  });
+
+  it("单横线短选项按未知选项报错，且不调用网关", async () => {
+    const root = makeRoot();
+    await expect(asSearch(root, ["-x"])).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("未知选项：-x"),
+    });
+    await expect(asFetch(root, ["https://example.com/a", "-abc"])).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("未知选项：-abc"),
+    });
+    expect(lastCall).toBeUndefined();
+  });
+
+  it("-- 之后的单横线 token 仍可作为 query", async () => {
+    const root = makeRoot();
+    await asSearch(root, ["--", "-x"]);
+    expect(lastCall).toEqual({ tool: "search", args: { query: "-x" } });
+  });
+
+  it("负数值仍走范围校验而不是未知选项", async () => {
+    const root = makeRoot();
+    await expect(asSearch(root, ["x", "--num-results", "-1"])).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("--num-results 需要"),
+    });
+  });
+
+  it("重复指定同一选项报错，不静默覆盖", async () => {
+    const root = makeRoot();
+    await expect(
+      asFetch(root, ["https://example.com/a", "--render", "never", "--render", "always"]),
+    ).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("--render 只能指定一次"),
+    });
+    await expect(asSearch(root, ["x", "--fanout", "2", "--fanout", "3"])).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("--fanout 只能指定一次"),
+    });
+    await expect(
+      asFetch(root, ["https://example.com/a", "--render=never", "--render=always"]),
+    ).rejects.toMatchObject({
+      code: "UNEXPECTED",
+      exitCode: 2,
+      message: expect.stringContaining("--render 只能指定一次"),
+    });
+    expect(lastCall).toBeUndefined();
+  });
+
+  it("不同选项各自出现一次时正常解析", async () => {
+    const root = makeRoot();
+    await asSearch(root, ["x", "--fanout", "2", "--num-results", "3"]);
+    expect(lastCall).toEqual({
+      tool: "search",
+      args: { query: "x", num_results: 3, fanout: 2 },
+    });
+  });
+
   it("--json 数据面失败时带上游错误码与完整文本", async () => {
     const root = makeRoot();
     const result = await asSearch(root, ["fail"]);
