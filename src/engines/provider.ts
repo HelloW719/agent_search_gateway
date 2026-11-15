@@ -15,7 +15,9 @@ export interface EngineProviderContext {
   config: Record<string, unknown>;
   /** 与 secrets.yaml 同形的密钥切片。 */
   secrets: Record<string, unknown>;
-  /** 第三方 search 插件声明的密钥（已解析、只含非空字符串）。 */
+  /** 第三方 search 插件的私有配置（extensions.<manifest id>.config，已补默认值）。 */
+  pluginConfig?: Readonly<Record<string, unknown>>;
+  /** 第三方 search 插件密钥（extensions.<id>.<name>，已解析，空值不注入）。 */
   pluginSecrets?: Record<string, string>;
   logger?: Logger;
 }

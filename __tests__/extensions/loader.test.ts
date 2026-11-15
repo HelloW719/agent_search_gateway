@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { EngineProvider } from "../../src/engines/provider.js";
 import type { Logger } from "../../src/logger.js";
 import { extensionsDir, loadExtensions } from "../../src/extensions/loader.js";
 import { createFetchRegistry } from "../../src/fetch/plugins/index.js";
@@ -67,6 +68,93 @@ const ENGINE_ENTRY = [
   "};",
   "",
 ].join("\n");
+
+/** 把收到的 pluginConfig / pluginSecrets 塞进失败消息，测试里可直接读回。 */
+const CONTEXT_PROBE_ENGINE_ENTRY = [
+  "export const engine = {",
+  '  id: "gateway.search:demo",',
+  '  group: "gateway.search",',
+  '  name: "demo",',
+  '  kind: "gateway",',
+  '  displayName: "Demo",',
+  "  routing: () => ['category:demo'],",
+  "  available: () => true,",
+  "  runtime: {",
+  '    kind: "search",',
+  "    plan: (categories, ctx) => (ctx.pluginConfig ? { hot: true } : undefined),",
+  "    search: async (query, options, ctx) => ({",
+  "      ok: false,",
+  "      error: {",
+  "        kind: 'api',",
+  "        message: JSON.stringify({",
+  "          config: ctx.pluginConfig ?? null,",
+  "          configFrozen: ctx.pluginConfig ? Object.isFrozen(ctx.pluginConfig) : null,",
+  "          nestedFrozen: ctx.pluginConfig?.nested",
+  "            ? Object.isFrozen(ctx.pluginConfig.nested)",
+  "            : null,",
+  "          secrets: ctx.pluginSecrets ?? null,",
+  "          secretsFrozen: ctx.pluginSecrets ? Object.isFrozen(ctx.pluginSecrets) : null,",
+  "        }),",
+  "      },",
+  "      latencyMs: 0,",
+  "    }),",
+  "  },",
+  "};",
+  "",
+].join("\n");
+
+const CONFIG_FETCH_ENTRY = [
+  "export const fetch = {",
+  '  platform: "example",',
+  '  capabilities: ["page"],',
+  "  match: (url) => url.hostname === 'example.com',",
+  "  enabled: (ctx) => ctx.pluginConfig?.disabled !== true,",
+  "  available: (ctx) => ctx.pluginConfig?.maintenance !== true,",
+  "  async fetch(url, ctx) {",
+  "    return {",
+  "      ok: true,",
+  "      status: 200,",
+  "      finalUrl: `https://example.com/${ctx.pluginConfig?.marker ?? 'none'}/${ctx.pluginSecrets?.cookie ?? 'none'}`,",
+  "    };",
+  "  },",
+  "};",
+  "",
+].join("\n");
+
+/** 显式报告 pluginConfig 是否为 undefined；不声明 available，用于确认不会被凭空补上。 */
+const ABSENCE_FETCH_ENTRY = [
+  "export const fetch = {",
+  '  platform: "example",',
+  "  match: () => true,",
+  "  enabled: (ctx) => ctx.pluginConfig === undefined,",
+  "  async fetch(url, ctx) {",
+  '    return { ok: true, status: 200, finalUrl: String(ctx.pluginConfig) };',
+  "  },",
+  "};",
+  "",
+].join("\n");
+
+interface ContextProbe {
+  config: unknown;
+  configFrozen: boolean | null;
+  nestedFrozen: boolean | null;
+  secrets: unknown;
+  secretsFrozen: boolean | null;
+}
+
+/** 调用被包装的 search runtime，读回宿主注入的 pluginConfig / pluginSecrets。 */
+async function readContextProbe(provider: EngineProvider): Promise<ContextProbe> {
+  const runtime = provider.runtime;
+  if (runtime?.kind !== "search") throw new Error("expected search runtime");
+  const result = await runtime.search(
+    "q",
+    { hot: false, limit: 10 },
+    { config: {}, secrets: {} },
+  );
+  if (result.ok) throw new Error("expected probe failure");
+  return JSON.parse(result.error.message) as ContextProbe;
+}
+
 
 function fakeLogger(warnings: string[]): Logger {
   return {
@@ -470,5 +558,273 @@ describe("扩展配置覆盖（routing / secret）", () => {
       },
     });
     expect(loaded.engines[0]!.routing(ctx)).toEqual(["source"]);
+  });
+});
+
+describe("扩展私有配置（manifest.config_schema）", () => {
+  const ctx = { config: {}, secrets: {} } as const;
+
+  const SEARCH_SCHEMA = {
+    type: "object",
+    properties: {
+      limit: { type: "integer", default: 5 },
+      label: { type: "string", default: "default" },
+    },
+  };
+
+  function writeSearchPlugin(
+    root: string,
+    schema?: Record<string, unknown>,
+    entry = CONTEXT_PROBE_ENGINE_ENTRY,
+  ): void {
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({
+        id: "demo-search",
+        name: "Demo 搜索",
+        provides: ["search"],
+        ...(schema === undefined ? {} : { config_schema: schema }),
+      }),
+      entry,
+    );
+  }
+
+  it("未配置 config 时注入补齐默认值的 pluginConfig", async () => {
+    const root = tempRoot();
+    writeSearchPlugin(root, SEARCH_SCHEMA);
+
+    const loaded = await loadExtensions(root);
+    expect(loaded.errors).toEqual([]);
+
+    const probe = await readContextProbe(loaded.engines[0]!);
+    expect(probe.config).toEqual({ limit: 5, label: "default" });
+    expect(probe.configFrozen).toBe(true);
+    expect(loaded.engines[0]!.runtime!.kind).toBe("search");
+  });
+
+  it("用户配置覆盖 schema 默认值", async () => {
+    const root = tempRoot();
+    writeSearchPlugin(root, SEARCH_SCHEMA);
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "demo-search": { config: { limit: 9 } } },
+    });
+
+    const probe = await readContextProbe(loaded.engines[0]!);
+    expect(probe.config).toEqual({ limit: 9, label: "default" });
+  });
+
+  it("配置非法时跳过插件并记录字段名", async () => {
+    const root = tempRoot();
+    writeSearchPlugin(root, SEARCH_SCHEMA);
+
+    let imported = false;
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "demo-search": { config: { limit: "not-a-number" } } },
+      importModule: async (url) => {
+        imported = true;
+        return import(url);
+      },
+    });
+
+    expect(imported).toBe(false);
+    expect(loaded.engines).toEqual([]);
+    expect(loaded.fetch).toEqual([]);
+    expect(loaded.errors).toHaveLength(1);
+    expect(loaded.errors[0]).toMatchObject({
+      id: "demo-search",
+      error: expect.stringContaining("插件配置无效"),
+    });
+    expect(loaded.errors[0]!.error).toContain("limit");
+  });
+
+  it("未声明 schema 但有 config 时原样透传", async () => {
+    const root = tempRoot();
+    writeSearchPlugin(root);
+
+    const raw = { nested: { a: 1 }, list: [1, 2, 3] };
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "demo-search": { config: raw } },
+    });
+
+    const probe = await readContextProbe(loaded.engines[0]!);
+    expect(probe.config).toEqual(raw);
+    expect(probe.configFrozen).toBe(true);
+    expect(probe.nestedFrozen).toBe(true);
+  });
+
+  it("只在 engineId 下写 config 时插件拿不到", async () => {
+    const root = tempRoot();
+    writeSearchPlugin(root);
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "gateway.search:demo": { config: { marker: "x" } } },
+    });
+
+    const probe = await readContextProbe(loaded.engines[0]!);
+    expect(probe.config).toBeNull();
+    // 仍可正常提供原来的路由与运行时。
+    expect(loaded.engines[0]!.routing(ctx)).toEqual(["category:demo"]);
+  });
+
+  it("未声明 schema 且 config 为空对象时不注入 pluginConfig（settings 风格）", async () => {
+    const root = tempRoot();
+    writeSearchPlugin(root);
+
+    const loaded = await loadExtensions(root, {
+      // settings 经 zod 后 config 默认是 {}；空对象不应触发包装。
+      extensionConfig: { "demo-search": { routing: {}, config: {} } },
+    });
+
+    const provider = loaded.engines[0]!;
+    const runtime = provider.runtime!;
+    if (runtime.kind !== "search") throw new Error("expected search runtime");
+    expect(runtime.plan("anything", ctx)).toBeUndefined();
+    const probe = await readContextProbe(provider);
+    expect(probe.config).toBeNull();
+    expect(probe.configFrozen).toBeNull();
+  });
+});
+
+describe("fetch 插件的配置与密钥注入", () => {
+  it("enabled 与 fetch 都能读到 pluginConfig", async () => {
+    const root = tempRoot();
+    writeExtension(root, "demo-fetch", manifest(), CONFIG_FETCH_ENTRY);
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "demo-fetch": { config: { marker: "m1", disabled: false } } },
+    });
+
+    const plugin = loaded.fetch[0]!;
+    expect(plugin.enabled!({} as never)).toBe(true);
+    await expect(plugin.fetch(new URL("https://example.com/a"), {} as never)).resolves.toMatchObject({
+      ok: true,
+      finalUrl: "https://example.com/m1/none",
+    });
+
+    const off = await loadExtensions(root, {
+      extensionConfig: { "demo-fetch": { config: { disabled: true } } },
+    });
+    expect(off.fetch[0]!.enabled!({} as never)).toBe(false);
+  });
+
+  it("match 不受配置影响", async () => {
+    const root = tempRoot();
+    writeExtension(root, "demo-fetch", manifest(), CONFIG_FETCH_ENTRY);
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: {
+        "demo-fetch": {
+          config: { disabled: true, marker: "https://other.com/", hostname: 42 },
+        },
+      },
+    });
+
+    const plugin = loaded.fetch[0]!;
+    expect(plugin.match(new URL("https://example.com/a"))).toBe(true);
+    expect(plugin.match(new URL("https://other.com/a"))).toBe(false);
+    // 同一个坏配置确实被注入到了 enabled，说明包装生效但 match 未参与。
+    expect(plugin.enabled!({} as never)).toBe(false);
+  });
+
+  it("插件能拿到 pluginSecrets（manifest id 键）", async () => {
+    const root = tempRoot();
+    writeExtension(root, "demo-fetch", manifest(), CONFIG_FETCH_ENTRY);
+
+    const loaded = await loadExtensions(root, {
+      extensionSecrets: { "demo-fetch": { cookie: "manifest-cookie" } },
+    });
+
+    await expect(loaded.fetch[0]!.fetch(new URL("https://example.com/a"), {} as never)).resolves
+      .toMatchObject({ finalUrl: "https://example.com/none/manifest-cookie" });
+  });
+
+  it("未声明 schema 且 config 为空对象时不注入 pluginConfig（settings 风格）", async () => {
+    const root = tempRoot();
+    writeExtension(root, "demo-fetch", manifest(), ABSENCE_FETCH_ENTRY);
+
+    const loaded = await loadExtensions(root, {
+      // settings 经 zod 后 config 默认是 {}；空对象不应触发包装或注入。
+      extensionConfig: { "demo-fetch": { routing: {}, config: {} } },
+    });
+
+    const plugin = loaded.fetch[0]!;
+    expect(plugin.enabled!({} as never)).toBe(true);
+    // 原本没有 available，也不能凭空补一个。
+    expect(plugin.available).toBeUndefined();
+    const result = await plugin.fetch(new URL("https://example.com/a"), {} as never);
+    expect(result.finalUrl).toBe("undefined");
+  });
+
+  it("未声明 schema 但 config 非空时原样注入", async () => {
+    const root = tempRoot();
+    writeExtension(root, "demo-fetch", manifest(), CONFIG_FETCH_ENTRY);
+
+    const loaded = await loadExtensions(root, {
+      extensionConfig: { "demo-fetch": { config: { marker: "m2" } } },
+    });
+
+    await expect(loaded.fetch[0]!.fetch(new URL("https://example.com/a"), {} as never)).resolves
+      .toMatchObject({ finalUrl: "https://example.com/m2/none" });
+  });
+});
+
+describe("密钥键兼容 engineId 与 manifest id", () => {
+  it("旧的 engineId 键仍生效，manifest id 键覆盖它", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      CONTEXT_PROBE_ENGINE_ENTRY,
+    );
+
+    const legacy = await loadExtensions(root, {
+      extensionSecrets: { "gateway.search:demo": { cookie: "legacy-value" } },
+    });
+    const legacyProbe = await readContextProbe(legacy.engines[0]!);
+    expect(legacyProbe.secrets).toEqual({ cookie: "legacy-value" });
+
+    const overridden = await loadExtensions(root, {
+      extensionSecrets: {
+        "gateway.search:demo": { cookie: "legacy-value", token: "legacy-token" },
+        "demo-search": { cookie: "manifest-value" },
+      },
+    });
+    const overriddenProbe = await readContextProbe(overridden.engines[0]!);
+    expect(overriddenProbe.secrets).toEqual({
+      cookie: "manifest-value",
+      token: "legacy-token",
+    });
+    expect(overriddenProbe.secretsFrozen).toBe(true);
+  });
+
+  it("search 的 secret: 依赖按合并后的密钥判定", async () => {
+    const root = tempRoot();
+    const entry = CONTEXT_PROBE_ENGINE_ENTRY.replace(
+      '  available: () => true,',
+      '  available: () => true,\n  requires: ["secret:cookie"],',
+    );
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({ id: "demo-search", name: "Demo 搜索", provides: ["search"] }),
+      entry,
+    );
+
+    const ctx = { config: {}, secrets: {} } as const;
+    const none = await loadExtensions(root);
+    expect(none.engines[0]!.available(ctx)).toBe(false);
+
+    const viaManifest = await loadExtensions(root, {
+      extensionSecrets: { "demo-search": { cookie: "manifest-cookie" } },
+    });
+    expect(viaManifest.engines[0]!.available(ctx)).toBe(true);
+
+    const viaLegacy = await loadExtensions(root, {
+      extensionSecrets: { "gateway.search:demo": { cookie: "legacy-cookie" } },
+    });
+    expect(viaLegacy.engines[0]!.available(ctx)).toBe(true);
   });
 });

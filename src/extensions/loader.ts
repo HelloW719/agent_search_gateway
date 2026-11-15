@@ -12,10 +12,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { EngineProvider, EngineProviderContext } from "../engines/provider.js";
-import type { FetchPlugin } from "../fetch/plugins/types.js";
+import type { FetchPlugin, FetchPluginContext } from "../fetch/plugins/types.js";
 import type { Logger } from "../logger.js";
 import { hasCategory } from "../search/category.js";
 import { resolveSecretValue } from "../settings/secret-ref.js";
+import { deepFreeze, resolvePluginConfig, type PluginConfig } from "./config.js";
 import { extensionsDir } from "./install.js";
 import { parseManifest, type ExtensionManifest } from "./manifest.js";
 
@@ -33,9 +34,10 @@ export type ExtensionModuleImporter = (url: string) => Promise<unknown>;
 export interface LoadExtensionsOptions {
   logger?: Logger;
   importModule?: ExtensionModuleImporter;
-  /** gateway.yaml 的 `extensions` 段（按完整 engineId 索引）。CLI 可能传未经 schema 校验的原始值。 */
+  /** gateway.yaml 的 `extensions` 段：routing 按完整 engineId 索引，config 按 manifest id 索引。
+   *  CLI 可能传未经 schema 校验的原始值。 */
   extensionConfig?: Record<string, unknown>;
-  /** secrets.yaml 的 `extensions` 段（按完整 engineId 索引）。 */
+  /** secrets.yaml 的 `extensions` 段：同时兼容完整 engineId 与 manifest id（manifest id 优先）。 */
   extensionSecrets?: Record<string, unknown>;
   /** 解析 `env:NAME` 用的环境变量，默认 process.env。 */
   env?: NodeJS.ProcessEnv;
@@ -129,7 +131,10 @@ interface ExtensionRouting {
   hotCategory?: string;
 }
 
-/** 按 engineId 取 `extensions` 段里的条目；非对象一律忽略（CLI 可能传未校验值）。 */
+/** 按 key 取 `extensions` 段里的条目；非对象一律忽略（CLI 可能传未校验值）。
+ *
+ * routing 用完整 engineId 作 key，config / secrets 还额外支持 manifest id。
+ */
 function extensionEntry(value: unknown, engineId: string): Record<string, unknown> | undefined {
   if (!isRecord(value)) return undefined;
   const entry = value[engineId];
@@ -164,24 +169,52 @@ function pluginSecretsOf(
   return out;
 }
 
+/** 合并 `extensions.<engineId>` 与 `extensions.<manifest id>` 两个密钥段。
+ *
+ * manifest id 是新的规范键，优先级高于 engineId（旧的 engineId 键继续兼容）。
+ * 解析后仍为空的值不注入，因此空值不会清掉旧键里已有的非空值。
+ */
+function mergePluginSecrets(
+  options: LoadExtensionsOptions,
+  engineId: string | undefined,
+  manifestId: string,
+): Record<string, string> {
+  const env = options.env ?? process.env;
+  const legacy =
+    engineId === undefined
+      ? {}
+      : pluginSecretsOf(extensionEntry(options.extensionSecrets, engineId), env);
+  const current = pluginSecretsOf(extensionEntry(options.extensionSecrets, manifestId), env);
+  return deepFreeze({ ...legacy, ...current });
+}
+
 /**
  * 用 gateway.yaml / secrets.yaml 的 `extensions` 段包装插件 provider。
  *
- * 只在确有配置（路由 / 密钥 / `secret:` 依赖）时包装；未配置的插件保持原对象，
+ * 只在确有配置（路由 / 密钥 / `secret:` 依赖 / 私有 config）时包装；未配置的插件保持原对象，
  * 运行期与 CLI 的行为完全不变。
  */
 function withExtensionOptions(
   provider: EngineProvider,
   pluginSecrets: Record<string, string>,
   routing: ExtensionRouting,
+  pluginConfig: PluginConfig,
+  hasConfig: boolean,
 ): EngineProvider {
   const hasRouting = routing.category !== undefined || routing.hotCategory !== undefined;
   const requiredSecrets = (provider.requires ?? []).filter((item) =>
     item.startsWith("secret:"),
   );
 
-  const augment = (ctx: EngineProviderContext): EngineProviderContext =>
-    Object.keys(pluginSecrets).length > 0 ? { ...ctx, pluginSecrets } : ctx;
+  const augment = (ctx: EngineProviderContext): EngineProviderContext => {
+    const hasSecrets = Object.keys(pluginSecrets).length > 0;
+    if (!hasConfig && !hasSecrets) return ctx;
+    return {
+      ...ctx,
+      ...(hasConfig ? { pluginConfig } : {}),
+      ...(hasSecrets ? { pluginSecrets } : {}),
+    };
+  };
 
   const routingList = (): string[] => {
     const list: string[] = [];
@@ -227,13 +260,16 @@ function withExtensionOptions(
   };
 }
 
-/** 按 engineId 合并扩展配置；没有任何扩展配置时直接返回原 provider。 */
+/** 按 engineId 读路由，再把调用方解析好的密钥/私有配置注入 provider。 */
 function applyExtensionOptions(
   provider: EngineProvider,
   options: LoadExtensionsOptions,
+  pluginConfig: PluginConfig,
+  pluginSecrets: Record<string, string>,
+  hasConfig: boolean,
 ): EngineProvider {
+  // routing 仍只认 `extensions.<engineId>.routing`；config 的键是 manifest id（由调用方解析）。
   const configEntry = extensionEntry(options.extensionConfig, provider.id);
-  const secretEntry = extensionEntry(options.extensionSecrets, provider.id);
   // 路由覆盖只对类别分流的文本源有意义；图搜源的 routing 固定为 source。
   const routing = provider.group === "gateway.search" ? routingOf(configEntry) : {};
   const hasRouting = routing.category !== undefined || routing.hotCategory !== undefined;
@@ -241,10 +277,48 @@ function applyExtensionOptions(
     item.startsWith("secret:"),
   );
 
-  if (!hasRouting && !secretEntry && !hasSecretRequirement) return provider;
+  if (
+    !hasRouting &&
+    !hasSecretRequirement &&
+    !hasConfig &&
+    Object.keys(pluginSecrets).length === 0
+  ) {
+    return provider;
+  }
 
-  const pluginSecrets = pluginSecretsOf(secretEntry, options.env ?? process.env);
-  return withExtensionOptions(provider, pluginSecrets, routing);
+  return withExtensionOptions(provider, pluginSecrets, routing, pluginConfig, hasConfig);
+}
+
+/**
+ * 用 `extensions` 段包装 fetch 插件：只增强 `enabled` / `available` / `fetch`。
+ *
+ * `match(url)` 保持原函数原样（契约要求它只读 URL、不读配置）；
+ * 没有 `enabled` / `available` 时不凭空补一个。
+ */
+function withFetchOptions(
+  plugin: FetchPlugin,
+  pluginConfig: PluginConfig,
+  pluginSecrets: Record<string, string>,
+  hasConfig: boolean,
+): FetchPlugin {
+  const hasSecrets = Object.keys(pluginSecrets).length > 0;
+  if (!hasConfig && !hasSecrets) return plugin;
+
+  const augment = (ctx: FetchPluginContext): FetchPluginContext => ({
+    ...ctx,
+    ...(hasConfig ? { pluginConfig } : {}),
+    ...(hasSecrets ? { pluginSecrets } : {}),
+  });
+
+  const enabled = plugin.enabled;
+  const available = plugin.available;
+
+  return {
+    ...plugin,
+    ...(enabled ? { enabled: (ctx: FetchPluginContext) => enabled(augment(ctx)) } : {}),
+    ...(available ? { available: (ctx: FetchPluginContext) => available(augment(ctx)) } : {}),
+    fetch: (url: URL, ctx: FetchPluginContext) => plugin.fetch(url, augment(ctx)),
+  };
 }
 
 /**
@@ -308,6 +382,19 @@ export async function loadExtensions(
       continue;
     }
 
+    // config 的键是 manifest id（不是 engineId）；校验失败时整包跳过。
+    const rawConfig = extensionEntry(opts.extensionConfig, manifest.id)?.config;
+    const resolved = resolvePluginConfig(manifest.config_schema, rawConfig);
+    if (!resolved.ok) {
+      fail(result, logger, manifest.id, `插件配置无效：${resolved.error}`);
+      continue;
+    }
+    // settings 经 zod 后 config 默认是 {}；空对象不算“配置”，避免无谓包装与注入。
+    const hasConfig =
+      manifest.config_schema !== undefined ||
+      (isRecord(rawConfig) && Object.keys(rawConfig).length > 0);
+    const pluginConfig = deepFreeze(resolved.value);
+
     let mod: unknown;
     try {
       mod = await importModule(pathToFileURL(path.join(dir, manifest.entry)).href);
@@ -320,6 +407,11 @@ export async function loadExtensions(
       continue;
     }
 
+    // 密钥兼容旧的 engineId 键；只有 search 插件能提供 engineId，fetch-only 默认只认 manifest id。
+    const engineId =
+      isRecord(mod.engine) && nonEmptyString(mod.engine.id) ? mod.engine.id : undefined;
+    const pluginSecrets = mergePluginSecrets(opts, engineId, manifest.id);
+
     if (manifest.provides.includes("fetch")) {
       if (!isRecord(mod.fetch)) {
         fail(result, logger, manifest.id, "入口未导出 fetch 对象");
@@ -327,7 +419,8 @@ export async function loadExtensions(
         fail(result, logger, manifest.id, `fetch 插件 id 重复：${manifest.id}`);
       } else {
         try {
-          result.fetch.push(toFetchPlugin(manifest, mod.fetch));
+          const plugin = toFetchPlugin(manifest, mod.fetch);
+          result.fetch.push(withFetchOptions(plugin, pluginConfig, pluginSecrets, hasConfig));
         } catch (error) {
           fail(result, logger, manifest.id, error);
         }
@@ -342,6 +435,9 @@ export async function loadExtensions(
           const provider = applyExtensionOptions(
             toEngineProvider(manifest, mod.engine),
             opts,
+            pluginConfig,
+            pluginSecrets,
+            hasConfig,
           );
           if (result.engines.some((item) => item.id === provider.id)) {
             fail(result, logger, manifest.id, `search 插件 id 重复：${provider.id}`);
