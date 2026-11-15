@@ -110,13 +110,13 @@ elif command -v node >/dev/null 2>&1 && [ "$(node_major "$(command -v node)")" -
 fi
 
 if [ -z "$NODE_BIN" ]; then
-  log "未找到 Node.js >= $MIN_NODE_MAJOR，下载官方 LTS ..."
+  log "未找到 Node.js >= ${MIN_NODE_MAJOR}，下载官方 LTS ..."
   TMP_NODE="$(mktemp -d)"
   trap 'rm -rf "$TMP_NODE"' EXIT
   SUMS_URL="https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt"
   download "$SUMS_URL" "$TMP_NODE/SHASUMS256.txt"
   NODE_FILE="$(grep -o "node-v[0-9.]*-${PLATFORM}\.tar\.gz" "$TMP_NODE/SHASUMS256.txt" | head -1 || true)"
-  [ -n "$NODE_FILE" ] || die "无法确定 Node.js 包名（$PLATFORM）"
+  [ -n "$NODE_FILE" ] || die "无法确定 Node.js 包名（${PLATFORM}）"
   NODE_URL="https://nodejs.org/dist/latest-v22.x/$NODE_FILE"
   download "$NODE_URL" "$TMP_NODE/$NODE_FILE"
   EXPECTED="$(grep " $NODE_FILE$" "$TMP_NODE/SHASUMS256.txt" | awk '{print $1}' | head -1)"
@@ -160,15 +160,43 @@ if [ "$TAG" = "latest" ]; then
   TAG="v${RUNTIME_VERSION#v}"
 fi
 ASSET_URL="https://github.com/$REPO/releases/download/$TAG/$ASSET_NAME"
-log "安装版本: $RUNTIME_VERSION（$PLATFORM）"
+log "安装版本: ${RUNTIME_VERSION}（${PLATFORM}）"
+
+# 下载安装包：能复用缓存就复用，能续传就续传，校验失败再整包重下一次。
+# 弱网/代理环境下反复重跑不会每次都从 0 开始。
+download_asset() {
+  local url="$1" dest="$2" expected="$3"
+  if [ -z "$expected" ]; then
+    log "下载 $(basename "$dest") ..."
+    download "$url" "$dest"
+    return 0
+  fi
+
+  if [ -f "$dest" ] && [ "$(sha256_of "$dest")" = "$expected" ]; then
+    log "复用已缓存安装包: $(basename "$dest")"
+    return 0
+  fi
+
+  if [ -f "$dest" ]; then
+    log "发现未完成的下载，尝试续传: $(basename "$dest")"
+    if command -v curl >/dev/null 2>&1 &&
+       curl -fsSL -C - --retry 2 --connect-timeout 20 -o "$dest" "$url" &&
+       [ "$(sha256_of "$dest")" = "$expected" ]; then
+      return 0
+    fi
+  fi
+
+  log "下载 $(basename "$dest") ..."
+  rm -f "$dest"
+  download "$url" "$dest"
+}
 
 # ---------- 下载并解压完整包 ----------
 RELEASES="$ROOT/data/releases"
 TARGET="$RELEASES/${RUNTIME_VERSION}-${PLATFORM}"
 mkdir -p "$RELEASES" "$ROOT/data/download-cache"
 ARCHIVE="$ROOT/data/download-cache/$ASSET_NAME"
-log "下载 $ASSET_NAME ..."
-download "$ASSET_URL" "$ARCHIVE"
+download_asset "$ASSET_URL" "$ARCHIVE" "$ASSET_SHA"
 ACTUAL_SHA="$(sha256_of "$ARCHIVE")"
 [ -z "$ASSET_SHA" ] || [ "$ASSET_SHA" = "$ACTUAL_SHA" ] || die "安装包 SHA256 校验失败"
 log "SHA256 校验通过"

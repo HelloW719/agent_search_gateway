@@ -290,6 +290,7 @@ asg restart
 - 安装位置：`data/extensions/<id>/`；卸载用 `asg extensions remove <id>`。
 - 插件与网关同进程运行，没有沙箱；只安装可信来源。
 - 发现：GitHub topic `asg-plugin`；`asg extensions search` 只列仓库，安装仍需显式执行。
+- GitHub API 有速率限制：安装/更新插件前建议先 `export GITHUB_TOKEN=$(gh auth token)`（或 `GH_TOKEN`），否则可能遇到 403 `API rate limit exceeded`。
 - 详细契约见 [`docs/extensions.md`](docs/extensions.md)；插件开发可把 [`skills/asg-plugin-authoring/`](skills/asg-plugin-authoring/) 交给 AI 使用。
 
 ## 快速开始（源码）
@@ -528,6 +529,7 @@ asg plugins remove bili
 - 专栏服务需要登录态：在启动网关的环境里设置 `BILI_COOKIE` 或 `BILI_COOKIE_FILE`，不要写进 `gateway.yaml`。
 - 如果 PATH 里没有 Node，薄包装会自动下载官方 LTS 到 `data/toolchain/node/`。
 - 代理环境：脚本读取 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`，优先用系统 `curl` 下载（Windows 10+ 自带 `curl.exe`）。
+- GitHub 限流：安装后端/插件前可先 `export GITHUB_TOKEN=$(gh auth token)`（或 `GH_TOKEN`），否则可能遇到 403 `API rate limit exceeded`。
 
 ## 网关自更新
 

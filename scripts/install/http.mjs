@@ -120,6 +120,40 @@ async function downloadWithFetch(url, dest, headers, logger) {
   }
 }
 
+/** 没有安装对应命令（spawn ENOENT / not found）不算“真实下载失败”。 */
+function isMissingCommand(message) {
+  return /ENOENT|not found|不是内部或外部命令/i.test(message);
+}
+
+/**
+ * 把多次尝试的失败原因汇总成用户可读的错误文本。
+ *
+ * 旧实现只保留最后一次失败原因，macOS（没有 wget）会把真实的 403 限流
+ * 掩盖成 `wget: spawn wget ENOENT`。这里保留全部原因，并在出现 403/429
+ * 时优先提示配置 GITHUB_TOKEN。
+ */
+export function formatDownloadFailure(url, reasons, { proxy = null } = {}) {
+  const lines = [`下载失败: ${url}`];
+  const real = reasons.filter((item) => item && !isMissingCommand(item));
+  if (real.length > 0) {
+    for (const reason of real) lines.push(`- ${reason}`);
+  } else {
+    lines.push('- 没有可用的下载方式（fetch / curl / wget 均不可用或未安装）');
+  }
+  if (real.some((reason) => /HTTP\s*(403|429)|rate limit/i.test(reason))) {
+    lines.push(
+      '原因疑似 GitHub API 限流（403/429）：先 export GITHUB_TOKEN=$(gh auth token)（或 GH_TOKEN）再重试；CI 里请配置 GITHUB_TOKEN。',
+    );
+  } else if (proxy) {
+    lines.push(`已检测到代理变量 ${proxy}，请检查代理是否可用。`);
+  } else {
+    lines.push(
+      '若在代理环境，请设置 HTTPS_PROXY（或 https_proxy）后重试，例如 HTTPS_PROXY=http://127.0.0.1:7897。',
+    );
+  }
+  return lines.join('\n');
+}
+
 /** 下载文件到 dest；失败抛错并清理临时文件。headers 用于 GitHub API 等需要自定义请求头的场景。 */
 export async function download(url, dest, { token = '', logger, headers = {} } = {}) {
   assertHttps(url);
@@ -131,7 +165,7 @@ export async function download(url, dest, { token = '', logger, headers = {} } =
     ? [downloadWithCurl, downloadWithWget, downloadWithFetch]
     : [downloadWithFetch, downloadWithCurl, downloadWithWget];
 
-  let reason = '';
+  const reasons = [];
   try {
     for (const attempt of attempts) {
       try {
@@ -142,15 +176,12 @@ export async function download(url, dest, { token = '', logger, headers = {} } =
           await fs.rename(tmp, dest);
           return dest;
         }
-        reason = failure;
+        reasons.push(failure);
       } catch (error) {
-        reason = error instanceof Error ? error.message : String(error);
+        reasons.push(error instanceof Error ? error.message : String(error));
       }
     }
-    const hint = proxy
-      ? `已检测到代理变量 ${proxy}，请检查代理是否可用。`
-      : '若在代理环境，请设置 HTTPS_PROXY（或 https_proxy）后重试，例如 HTTPS_PROXY=http://127.0.0.1:7897。';
-    throw new Error(`下载失败: ${url}\n${reason ? `原因: ${reason}\n` : ''}${hint}`);
+    throw new Error(formatDownloadFailure(url, reasons, { proxy }));
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => {});
   }

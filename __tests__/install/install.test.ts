@@ -15,7 +15,7 @@ import {
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import { installSearxng } from "../../scripts/install/deps/searxng.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
-import { buildHeaders, proxyEnvName, sha256File, verifySha256 } from "../../scripts/install/http.mjs";
+import { buildHeaders, formatDownloadFailure, proxyEnvName, sha256File, verifySha256 } from "../../scripts/install/http.mjs";
 // @ts-expect-error 纯 JS 安装脚本没有类型声明
 import {
   disableBundledReadline,
@@ -246,6 +246,48 @@ describe("下载校验", () => {
   });
 });
 
+describe("下载失败原因汇总", () => {
+  const url = "https://api.github.com/repos/a/b/releases/tags/v1";
+
+  it("保留全部真实原因，403 优先提示 GITHUB_TOKEN", () => {
+    const text = formatDownloadFailure(url, [
+      "HTTP 403",
+      "curl: curl: (22) The requested URL returned error: 403",
+      "wget: spawn wget ENOENT",
+    ]);
+    expect(text).toContain("下载失败");
+    expect(text).toContain("- HTTP 403");
+    expect(text).toContain("403");
+    expect(text).toContain("GITHUB_TOKEN");
+    expect(text).not.toContain("HTTPS_PROXY=");
+  });
+
+  it("过滤命令不存在，避免掩盖真实原因", () => {
+    const text = formatDownloadFailure(url, [
+      "fetch: 网络错误",
+      "wget: spawn wget ENOENT",
+    ]);
+    expect(text).toContain("- fetch: 网络错误");
+    expect(text).not.toContain("wget");
+    expect(text).toContain("HTTPS_PROXY");
+  });
+
+  it("全部是命令缺失时给出明确结论", () => {
+    const text = formatDownloadFailure(url, [
+      "curl: spawn curl ENOENT",
+      "wget: spawn wget ENOENT",
+    ]);
+    expect(text).toContain("没有可用的下载方式");
+    expect(text).not.toContain("GITHUB_TOKEN");
+  });
+
+  it("检测到代理变量时优先提示检查代理", () => {
+    const text = formatDownloadFailure(url, ["fetch: fetch failed"], { proxy: "HTTPS_PROXY" });
+    expect(text).toContain("已检测到代理变量 HTTPS_PROXY");
+    expect(text).not.toContain("export GITHUB_TOKEN");
+  });
+});
+
 describe("FlareSolverr 自带 readline 冲突", () => {
   it("识别 /bin/sh 的 symbol lookup error", () => {
     expect(
@@ -313,5 +355,17 @@ describe("引导脚本语法", () => {
     const text = buffer.toString("utf8");
     expect(text).not.toMatch(/^\s*param\s*\(/m);
     expect(text).not.toMatch(/^\s*exit\b/m);
+  });
+
+  it("shell 变量不紧跟非 ASCII 字符（防中文括号吞进变量名）", () => {
+    // bash 3.2（macOS 自带）把全角括号算进变量名，`$VAR（` 会变成 `VAR（` → unbound variable。
+    const files = ["scripts/install.sh", "scripts/install-weibo-override.sh", "scripts/bench.sh"];
+    const pattern = /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/;
+    for (const file of files) {
+      const text = readFileSync(join(ROOT, file), "utf8");
+      text.split(/\r?\n/).forEach((line, index) => {
+        expect(pattern.test(line), `${file}:${index + 1} ${line}`).toBe(false);
+      });
+    }
   });
 });
