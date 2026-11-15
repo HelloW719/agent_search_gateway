@@ -271,3 +271,11 @@ describe("createSearchService + 语义语料", () => {
     expect(r.text).not.toContain("Cached Hit");
   });
 });
+
+describe("query 归一化", () => {
+  it("纯空白 query 发送前 trim 成空串", async () => {
+    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    await svc.search({ query: "   " });
+    expect(lastQuery).toBe("");
+  });
+});

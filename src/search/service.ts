@@ -746,6 +746,8 @@ export function createSearchService(
 
   async function runSearch(params: SearchParams): Promise<SearchOutcome> {
     const tStart = performance.now();
+    // query 先 trim：`""` 与 `"   "` 行为一致，避免纯空白串空耗上游后伪装成“0 结果成功”。
+    params = { ...params, query: (params.query ?? "").trim() };
     // 反向图搜（ADR-0010）：类别命中才拉起网关侧附加源。命中时把类别名归一成
     // 规范写法再转发（searxng 按字面匹配类别）；未命中则参数逐字不变。
     const reverseCategory = search.reverse_image.category;
