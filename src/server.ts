@@ -16,7 +16,7 @@ import { FetchStore } from "./fetch/store.js";
 import { loadExtensions } from "./extensions/loader.js";
 import type { EngineProvider } from "./engines/provider.js";
 import { setExternalEngineProviders } from "./engines/registry.js";
-import { getHealth } from "./health.js";
+import { getHealth, type SemanticHealth } from "./health.js";
 import type { Logger } from "./logger.js";
 import { createSearchService } from "./search/service.js";
 import { createEmbeddingProvider, type EmbeddingProvider } from "./search/embedding/provider.js";
@@ -221,6 +221,25 @@ interface SemanticRuntime {
   dim: number;
 }
 
+/**
+ * 语义层健康快照：MCP `health` 与 HTTP `/health` 共用同一口径，
+ * 避免两个入口对 embedding 状态给出相反结论。
+ */
+export function semanticHealthSnapshot(
+  settings: Settings,
+  semantic: SemanticRuntime | null,
+): SemanticHealth | undefined {
+  if (!semantic) return undefined;
+  return {
+    embeddingUp: semantic.provider !== null,
+    model: settings.embedding.model || undefined,
+    dim: semantic.dim || undefined,
+    corpus: semantic.corpus
+      ? { namespace: semantic.corpus.namespace, entries: semantic.corpus.stats().entries }
+      : undefined,
+  };
+}
+
 let sharedSemantic: Promise<SemanticRuntime> | null = null;
 let semanticSweep: ReturnType<typeof setInterval> | null = null;
 let semanticClosed = false;
@@ -393,14 +412,7 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
       const report = await getHealth(
         { searxng: settings.searxng, flaresolverr: settings.flaresolverr, embedding: settings.embedding },
         PROCESS_STARTED_AT,
-        {
-          embeddingUp: semantic.provider !== null,
-          model: settings.embedding.model || undefined,
-          dim: semantic.dim || undefined,
-          corpus: semantic.corpus
-            ? { namespace: semantic.corpus.namespace, entries: semantic.corpus.stats().entries }
-            : undefined,
-        },
+        semanticHealthSnapshot(settings, semantic),
       );
       logger.debug(`health probe: searxng=${report.searxng.status} flaresolverr=${report.flaresolverr.status}`);
       return { content: [{ type: "text" as const, text: JSON.stringify(report, null, 2) }] };
@@ -747,9 +759,13 @@ export async function startHttpServer(
 
     // 健康检查端点（不经 MCP）
     if (url.pathname === "/health" && req.method === "GET") {
+      // 语义层是进程级单例：首次 /health 会触发一次探针，之后直接复用结果。
+      // 这样探针与 MCP health 看到同一份 embedding 状态，不会一边 up 一边 down。
+      const semantic = await getSemanticRuntime(settings, secrets, logger);
       const report = await getHealth(
         { searxng: settings.searxng, flaresolverr: settings.flaresolverr, embedding: settings.embedding },
         PROCESS_STARTED_AT,
+        semanticHealthSnapshot(settings, semantic),
       );
       writeJson(res, 200, report);
       return;

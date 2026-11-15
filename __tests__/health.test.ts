@@ -59,4 +59,35 @@ describe("getHealth", () => {
     expect(h.searxng.status).toBe("up");
     expect(h.flaresolverr.status).toBe("down");
   });
+
+  it("语义层可用时 embedding/corpus 报告 up", async () => {
+    const cfg = healthDeps(
+      makeSettings({
+        searxng: { url: `http://127.0.0.1:${upPort}` },
+        flaresolverr: { url: `http://127.0.0.1:${upPort}` },
+        embedding: { enabled: true, model: "BAAI/bge-m3" },
+      }),
+    );
+    const h = await getHealth(cfg, Date.now(), {
+      embeddingUp: true,
+      model: "BAAI/bge-m3",
+      dim: 1024,
+      corpus: { namespace: "openai:BAAI/bge-m3@1024", entries: 170 },
+    });
+    expect(h.embedding).toEqual({ status: "up", model: "BAAI/bge-m3", dim: 1024 });
+    expect(h.corpus).toEqual({ namespace: "openai:BAAI/bge-m3@1024", entries: 170 });
+  });
+
+  it("embedding 启用但没有语义层快照时报告 down", async () => {
+    const cfg = healthDeps(
+      makeSettings({
+        searxng: { url: `http://127.0.0.1:${upPort}` },
+        flaresolverr: { url: `http://127.0.0.1:${upPort}` },
+        embedding: { enabled: true, model: "BAAI/bge-m3" },
+      }),
+    );
+    const h = await getHealth(cfg, Date.now());
+    expect(h.embedding?.status).toBe("down");
+    expect(h.corpus).toBeUndefined();
+  });
 });
