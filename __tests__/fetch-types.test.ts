@@ -68,6 +68,10 @@ beforeAll(async () => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ b: 1, a: [1, 2] }));
         return;
+      case "/json-precision":
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end('{"id":12345678901234567890,"big":1.234567890123456789,"dup":1,"dup":2}');
+        return;
       case "/csv":
         res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8" });
         res.end("name,score\nalice,90\nbob,85\n");
@@ -126,12 +130,28 @@ describe("fetch 全类型分派", () => {
     expect(r.text).not.toContain("已下载文件");
   });
 
-  it("application/json 美化为 json 代码块", async () => {
+  it("application/json 原样返回（仅包 json 代码块，不重排）", async () => {
     const svc = createFetchService(makeConfig(), silentLogger, undefined, tmpStore());
     const r = await svc.fetch({ url: `${base}/json` });
     expect(r.ok).toBe(true);
     expect(r.text).toContain("```json");
-    expect(r.text).toContain('"b": 1');
+    // 原文是 {"b":1,"a":[1,2]}：保持紧凑，不应出现美化后的空格
+    expect(r.text).toContain('{"b":1');
+    expect(r.text).not.toContain('"b": 1');
+  });
+
+  it("application/json 保精度直出（大整数 / 小数 / 重复键不被改写）", async () => {
+    const svc = createFetchService(makeConfig(), silentLogger, undefined, tmpStore());
+    const r = await svc.fetch({ url: `${base}/json-precision` });
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain("```json");
+    // 逐字保留原文字节：64 位 ID、长小数、重复键都不得被 parse/stringify 重排
+    expect(r.text).toContain('"id":12345678901234567890');
+    expect(r.text).toContain('"big":1.234567890123456789');
+    expect(r.text).toContain('"dup":1,"dup":2');
+    // 精度丢失 / 科学计数法的痕迹都不应出现
+    expect(r.text).not.toContain("12345678901234567000");
+    expect(r.text).not.toContain("1e+21");
   });
 
   it("text/csv 转 markdown 表格", async () => {

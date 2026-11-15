@@ -3,7 +3,7 @@
  *
  * fetch 从"仅 HTML"扩展为按类型分派：
  *   html   → html2md（既有路径）
- *   text   → 轻转换（JSON 美化 / CSV 转表格 / XML 包代码块 / 其余直出）
+ *   text   → 轻转换（JSON 原样加围栏 / CSV 转表格 / XML 包代码块 / 其余直出）
  *   pdf    → 抽正文（见 pdf.ts）
  *   binary → 落盘 + /files/<id>（见 store.ts）
  */
@@ -221,14 +221,14 @@ function fenced(label: string, body: string): string {
   return `${fence}${label}\n${body}\n${fence}`;
 }
 
-function prettyJson(body: string): string {
-  try {
-    return JSON.stringify(JSON.parse(body), null, 2);
-  } catch {
-    return body.trim();
-  }
+/**
+ * JSON 直出原文（仅 trim，不做 parse/stringify）。
+ * 重新序列化会丢 64 位 ID 精度、把大数变科学计数法、丢重复键并重排空白，
+ * 所以这里必须保持字节级正文不变。
+ */
+function rawJson(body: string): string {
+  return body.trim();
 }
-
 
 /**
  * 把已解码的文本类响应渲染成 markdown 文本。
@@ -236,7 +236,7 @@ function prettyJson(body: string): string {
  */
 export function renderTextBody(base: string, body: string, maxOutputChars: number): RenderedText {
   if (base === "application/json" || base.endsWith("+json")) {
-    return clip(fenced("json", prettyJson(body)), maxOutputChars);
+    return clip(fenced("json", rawJson(body)), maxOutputChars);
   }
   if (base === "text/csv") {
     return renderDelimited(body, ",", maxOutputChars);

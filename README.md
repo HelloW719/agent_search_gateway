@@ -378,7 +378,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 | 响应类型 | 处理 |
 |---|---|
 | `text/html`、`application/xhtml+xml` | 转 markdown（可选清理导航/广告）；正文为空/疑似 JS 或反爬时自动升级浏览器渲染（`render` 参数可控制） |
-| `text/*`、`application/json`、`application/xml` 等 | 直接返回；JSON 美化、CSV/TSV 转 markdown 表格、XML 包代码块 |
+| `text/*`、`application/json`、`application/xml` 等 | 直接返回；JSON 原样包代码块（不重新序列化，避免大整数/小数精度丢失）、CSV/TSV 转 markdown 表格、XML 包代码块 |
 | `application/pdf` | `unpdf` 抽正文（含页数标注）；扫描件无文本层则落盘 |
 | 图片 / 压缩包 / 其它二进制 | 落盘，返回**本地路径 + `/files/<id>` 链接 + 大小 + sha256**，正文不注入上下文 |
 
