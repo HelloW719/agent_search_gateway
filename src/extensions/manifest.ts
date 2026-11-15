@@ -6,6 +6,7 @@
 
 import path from "node:path";
 import { z } from "zod";
+import { validateConfigSchemaDefinition } from "./config.js";
 
 /** 插件 id：3-64 位小写字母/数字/`. _ -`，首尾必须是字母或数字。 */
 export const EXTENSION_ID_RE = /^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$/;
@@ -41,10 +42,16 @@ const manifestSchema = z
       .regex(/^[a-z0-9-]+$/, "platform 只能是小写字母/数字/-")
       .optional(),
     description: z.string().optional(),
+    /** 插件私有配置的声明（JSON Schema 子集）；校验见 config.ts。 */
+    config_schema: z.unknown().optional(),
   })
   .strict();
 
-export type ExtensionManifest = z.infer<typeof manifestSchema>;
+type ParsedManifest = z.infer<typeof manifestSchema>;
+
+export type ExtensionManifest = Omit<ParsedManifest, "config_schema"> & {
+  config_schema?: Record<string, unknown>;
+};
 
 /** manifest 解析/校验错误：消息已包含中文说明，调用方负责包装成 CLI 错误。 */
 export class ManifestError extends Error {
@@ -97,5 +104,15 @@ export function parseManifest(text: string): ExtensionManifest {
   if (!result.success) {
     throw new ManifestError(`asg-plugin.json 校验失败：${formatIssues(result.error)}`);
   }
-  return result.data;
+
+  if (result.data.config_schema !== undefined) {
+    try {
+      validateConfigSchemaDefinition(result.data.config_schema);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new ManifestError(`asg-plugin.json 校验失败：${detail}`);
+    }
+  }
+
+  return result.data as ExtensionManifest;
 }

@@ -315,6 +315,69 @@ extensions:
     });
   });
 
+  it("读取 extensions.<id>.config 并保留 routing", () => {
+    const d = tempDir();
+    writeFile(
+      d,
+      "gateway.yaml",
+      `
+extensions:
+  "gateway.search:demo":
+    routing:
+      category: news
+    config:
+      base_url: https://api.example.com
+      limit: 5
+      mode: fast
+      languages: [zh, en]
+      retry:
+        times: 2
+`,
+    );
+    const { settings } = load(d);
+    const extension = settings.extensions["gateway.search:demo"]!;
+    expect(extension.routing).toEqual({ category: "news", hot_category: undefined });
+    expect(extension.config).toEqual({
+      base_url: "https://api.example.com",
+      limit: 5,
+      mode: "fast",
+      languages: ["zh", "en"],
+      retry: { times: 2 },
+    });
+  });
+
+  it("extension 的 config 省略时默认空对象", () => {
+    const d = tempDir();
+    writeFile(
+      d,
+      "gateway.yaml",
+      `
+extensions:
+  "gateway.search:demo":
+    routing:
+      category: news
+`,
+    );
+    const { settings } = load(d);
+    expect(settings.extensions["gateway.search:demo"]!.config).toEqual({});
+  });
+
+  it("extension 的 config 是标量/数组/null 时报错", () => {
+    for (const value of ["enabled", "123", "[1, 2]", "null"]) {
+      const d = tempDir();
+      writeFile(
+        d,
+        "gateway.yaml",
+        `
+extensions:
+  "gateway.search:demo":
+    config: ${value}
+`,
+      );
+      expect(() => load(d), value).toThrow(/校验失败/);
+    }
+  });
+
   it("extensions 未知字段报错（strict）", () => {
     const d = tempDir();
     writeFile(

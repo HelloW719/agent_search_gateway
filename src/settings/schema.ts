@@ -342,7 +342,8 @@ export const corpusSchema = z
 /**
  * 第三方扩展的网关配置（按完整 engineId 索引）。
  *
- * 当前只承载路由覆盖：插件自身有默认类别，用户在这里按引擎改写。
+ * 承载路由覆盖与插件私有配置：插件自身有默认类别，用户在这里按引擎改写；
+ * config 段由插件 manifest 的 config_schema 校验，网关这里只要求它是对象。
  */
 const extensionRoutingSchema = z
   .object({
@@ -354,6 +355,7 @@ const extensionRoutingSchema = z
 const extensionSchema = z
   .object({
     routing: extensionRoutingSchema.default(() => extensionRoutingSchema.parse({})),
+    config: z.record(z.string(), z.unknown()).default(() => ({})),
   })
   .strict();
 
