@@ -49,6 +49,7 @@ gateway (本服务, :3000/mcp)
 |---|---|---|
 | `SEARCH_TIMEOUT` | searxng 超时 | 可重试 |
 | `SEARCH_UPSTREAM` | searxng 不可达 | 稍后重试 |
+| `SEARCH_AUTH_REQUIRED` | 搜索源未登录/鉴权失效（如微博） | 按提示登录后重试；不要自动重试 |
 | `SEARCH_INVALID` | searxng 返回异常 | 放弃 |
 | `FETCH_TIMEOUT` | 目标站超时 | 可重试 |
 | `FETCH_BLOCKED` | 反爬/SSRF 阻断 | 放弃或换源 |

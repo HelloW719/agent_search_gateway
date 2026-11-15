@@ -244,3 +244,46 @@ describe("0 结果 + 显式过滤的提示", () => {
     expect(r.text).not.toContain("注：已按");
   });
 });
+
+describe("网关侧搜索源失败的错误码", () => {
+  function providerWith(kind: "auth" | "timeout" | "network", message: string): EngineProvider {
+    return {
+      ...fakeWeiboProvider,
+      id: `gateway.search:fake-${kind}`,
+      name: `fake-${kind}`,
+      displayName: "FakeWeibo",
+      authHint: kind === "auth" ? "在 Chrome 登录 weibo.com 后重试。" : undefined,
+      runtime: {
+        kind: "search",
+        plan: () => ({ hot: false }),
+        search: async () => ({ ok: false, error: { kind, message }, latencyMs: 1 }),
+      },
+    };
+  }
+
+  it("auth → SEARCH_AUTH_REQUIRED，且保留原始信息与处理提示", async () => {
+    setExternalEngineProviders([providerWith("auth", "weibo post 失败：AUTH_REQUIRED")]);
+    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    const r = await svc.search({ query: "未登录", categories: "weibo" });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe("SEARCH_AUTH_REQUIRED");
+    expect(r.text).toContain("[SEARCH_AUTH_REQUIRED]");
+    expect(r.text).toContain("AUTH_REQUIRED");
+    expect(r.text).toContain("处理：在 Chrome 登录 weibo.com 后重试。");
+  });
+
+  it("timeout 仍映射为 SEARCH_TIMEOUT", async () => {
+    setExternalEngineProviders([providerWith("timeout", "命令超时")]);
+    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    const r = await svc.search({ query: "超时", categories: "weibo" });
+    expect(r.code).toBe("SEARCH_TIMEOUT");
+    expect(r.text).toContain("[SEARCH_TIMEOUT]");
+  });
+
+  it("network 仍映射为 SEARCH_UPSTREAM", async () => {
+    setExternalEngineProviders([providerWith("network", "连接失败")]);
+    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    const r = await svc.search({ query: "断网", categories: "weibo" });
+    expect(r.code).toBe("SEARCH_UPSTREAM");
+  });
+});

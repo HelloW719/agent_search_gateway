@@ -28,6 +28,7 @@ import { engineProvider, providersForGroup } from "../engines/registry.js";
 import type {
   EngineProvider,
   EngineProviderContext,
+  GatewaySearchError,
   GatewaySearchPlan,
   GatewaySearchRuntime,
 } from "../engines/provider.js";
@@ -50,6 +51,26 @@ export interface SearchOutcome {
   code?: (typeof ErrorCodes)[keyof typeof ErrorCodes];
   text: string;
   cacheHit?: boolean;
+}
+
+/**
+ * 上游失败类型 → 对外错误码。
+ * `auth` 是不可恢复的（需要用户登录），不能混进 `SEARCH_UPSTREAM`（语义是“稍后重试”）。
+ */
+function errorCodeForKind(
+  kind: GatewaySearchError["kind"] | SearchCallError["kind"],
+): NonNullable<SearchOutcome["code"]> {
+  switch (kind) {
+    case "timeout":
+      return ErrorCodes.SEARCH_TIMEOUT;
+    case "auth":
+      return ErrorCodes.SEARCH_AUTH_REQUIRED;
+    case "invalid":
+    case "invalid_json":
+      return ErrorCodes.SEARCH_INVALID;
+    default:
+      return ErrorCodes.SEARCH_UPSTREAM;
+  }
 }
 
 export interface SearchService {
@@ -667,8 +688,7 @@ export function createSearchService(
       const upstreamMs = performance.now() - tUp;
 
       if (!source.ok) {
-        const code =
-          source.error.kind === "timeout" ? ErrorCodes.SEARCH_TIMEOUT : ErrorCodes.SEARCH_UPSTREAM;
+        const code = errorCodeForKind(source.error.kind);
         const hint =
           source.error.kind === "auth" && provider.authHint
             ? `\n\n处理：${provider.authHint}`
@@ -1004,9 +1024,7 @@ export function createSearchService(
       if (!lastData && reverseCount === 0) {
         // 上游失败：报错但尽量附语料召回结果
         const e = lastError ?? { kind: "network" as const, message: "no engine available" };
-        let code: SearchOutcome["code"] = ErrorCodes.SEARCH_UPSTREAM;
-        if (e.kind === "timeout") code = ErrorCodes.SEARCH_TIMEOUT;
-        else if (e.kind === "invalid_json") code = ErrorCodes.SEARCH_INVALID;
+        const code = errorCodeForKind(e.kind);
         const errText = `搜索失败（${e.kind}${e.status ? ` ${e.status}` : ""}）：${e.message}\n\n请稍后重试，或更换关键词。`;
         const noteText = notes.length > 0 ? `\n\n${notes.map((n) => `> ${n}`).join("\n>\n")}` : "";
 

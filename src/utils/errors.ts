@@ -4,6 +4,8 @@ export const ErrorCodes = {
   // search
   SEARCH_TIMEOUT: "SEARCH_TIMEOUT",
   SEARCH_UPSTREAM: "SEARCH_UPSTREAM",
+  /** 搜索源需要登录/鉴权失效：不可自动恢复，应按提示登录后重试。 */
+  SEARCH_AUTH_REQUIRED: "SEARCH_AUTH_REQUIRED",
   SEARCH_INVALID: "SEARCH_INVALID",
   // fetch
   FETCH_TIMEOUT: "FETCH_TIMEOUT",

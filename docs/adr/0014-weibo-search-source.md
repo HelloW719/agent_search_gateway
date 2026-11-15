@@ -23,5 +23,5 @@
 - 微博搜索首次经常返回空（搜索页异步加载，OpenCLI 只等 2 秒）。源内自动重试一次（间隔 1 秒）；重试后仍为空按「没有结果」正常渲染，不报错。
 - 微博搜索**只保留微博候选**，不读本地语料、不写语料。排序不使用 embedding，避免为微博查询引入无关文本。
 - CLI 调用串行（`Semaphore(1)`），避免多个搜索抢同一个浏览器登录态；结果缓存 `search.weibo.cache_ttl_ms`（默认 60 秒）。
-- 失败映射：超时 → `SEARCH_TIMEOUT`；未登录/CLI 不可用/其它 → `SEARCH_UPSTREAM`，文本里带处理提示。微博源失败不会影响普通搜索路径。
+- 失败映射：超时 → `SEARCH_TIMEOUT`；未登录/鉴权失效 → `SEARCH_AUTH_REQUIRED`（不可自动恢复，文本里带处理提示）；CLI 不可用/其它 → `SEARCH_UPSTREAM`。微博源失败不会影响普通搜索路径。
 - 微博抓取仍走 `fetch` 的 `?weibo=` 动作（ADR 记录见 README）；抓取与搜索共用 `weibo.cli.command` 与登录态，但配置开关独立。
