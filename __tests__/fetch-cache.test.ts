@@ -12,8 +12,10 @@ describe("FetchCache", () => {
     const c = new FetchCache(100, 600000);
     c.set("direct", "https://a.com/", "direct md");
     c.set("playwright", "https://a.com/", "playwright md");
+    c.set("auto", "https://a.com/", "auto md");
     expect(c.get("direct", "https://a.com/")).toBe("direct md");
     expect(c.get("playwright", "https://a.com/")).toBe("playwright md");
+    expect(c.get("auto", "https://a.com/")).toBe("auto md");
   });
 
   it("maxChars 区分键", () => {

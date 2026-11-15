@@ -1,13 +1,15 @@
 # asg CLI 契约
 
-- 状态：已实现（0.3.5）
+- 状态：已实现（0.3.6）
 - 目标版本：0.3.0
-- 适用范围：安装完成后的运行期管理
+- 适用范围：安装完成后的运行期管理，以及只读的数据面冒烟测试
 - 相关：ADR-0018（CLI 控制面）、ADR-0019（GUI 只调 CLI）
 
 ## 0. 一句话
 
-`asg` 只做三件事：**探测三个服务、整栈启停、写配置文件后整栈重启**。
+`asg` 负责控制面：**探测三个服务、整栈启停、写配置文件后整栈重启**。
+
+另外提供两个只读的数据面冒烟命令 `asg search` / `asg fetch`：它们只是运行中网关的 MCP 客户端，用来验证搜索、抓取、插件和当前配置；CLI 不重新实现数据面，也不因这两个命令写配置或重启服务。
 
 不持有运行时状态，不做单组件重启，不支持 Docker；安装根不读环境变量（`env:` 密钥引用由运行期解析）。
 
@@ -138,7 +140,7 @@ asg logs -f --jsonl          # 每行一个 event
   {"type":"event","event":"log","service":"gateway","at":"...","line":"..."}
   ```
 
-## 4. status 契约
+## 4. status 与只读数据面
 
 ### 4.1 探测规则
 
@@ -187,6 +189,66 @@ gateway 不可访问 → 直接探 searxng /healthz 与 flaresolverr /
 `status` 是报告而不是断言：即使三个服务全部 down，`ok` 仍为 `true`，存活信息只体现在 `data.services`。只有找不到安装根或 `current` 时才返回 `ok:false`。
 
 `--json` 之外的默认输出为人类可读表格，格式不承诺稳定。
+
+### 4.3 search / fetch 冒烟
+
+```text
+asg search [query] [--categories <a,b>] [--engines <a,b>] [--language <code>]
+           [--safesearch 0|1|2] [--num-results <n>] [--fanout 1-4]
+           [--min-score 0-1] [--image-path <文件>] [--timeout <秒>]
+asg fetch <url> [--max-chars <n>] [--render auto|always|never] [--timeout <秒>]
+```
+
+- 两个命令只读：以 MCP 客户端调用运行中网关的 `/mcp`，不写配置、不重启服务。
+- endpoint 由 `gateway.host` / `gateway.port` 得到；`0.0.0.0` / `::` 自动换成本机地址。
+- token 取 `secrets.gateway.token`，环境变量 `GATEWAY_TOKEN` 可覆盖；401/403 报 `GATEWAY_UNAUTHORIZED`。
+- 参数直接映射 MCP 工具参数：`--categories` → `categories`，`--num-results` → `num_results`，`--image-path` → `image_path`（转为绝对路径），`--max-chars` → `max_chars`，`--render` → `render`（`auto` 默认 / `always` 强制浏览器 / `never` 关闭）。
+- `fetch` 的 `--json` 结果额外带 `render` 字段，表示本次请求的渲染模式。
+- `query` 可以省略：用于 `--categories weibo_hot` 或 `--image-path`；其余情况建议显式给出。
+- `--timeout` 默认 120 秒；`--` 之后的 token 一律当作 query/URL，不按选项解析。
+- 人类模式 stdout 原样输出 MCP 返回的 markdown；诊断信息走 stderr。
+- 成功时 `--json` 的 `data`：
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "search",
+  "data": {
+    "tool": "search",
+    "endpoint": "http://127.0.0.1:3000/mcp",
+    "elapsed_ms": 842,
+    "ok": true,
+    "code": null,
+    "text": "# Search: ..."
+  }
+}
+```
+
+- 搜索/抓取本身失败时仍保留网关返回的完整文本，错误码原样透传，退出码 1：
+
+```json
+{
+  "schema_version": 1,
+  "ok": false,
+  "command": "fetch",
+  "data": {
+    "tool": "fetch",
+    "endpoint": "http://127.0.0.1:3000/mcp",
+    "elapsed_ms": 1500,
+    "ok": false,
+    "code": "FETCH_BLOCKED",
+    "text": "[FETCH_BLOCKED] 抓取失败..."
+  },
+  "error": {
+    "code": "FETCH_BLOCKED",
+    "message": "抓取失败..."
+  }
+}
+```
+
+- 网关未启动：`SERVICE_DOWN`，退出码 1；token 错误：`GATEWAY_UNAUTHORIZED`，退出码 1。
+- 参数错误（缺 URL、非法范围、未知选项）：`UNEXPECTED`，退出码 2。
 
 ## 5. 配置写入契约
 
@@ -490,7 +552,7 @@ asg doctor
 
 ```text
 0 成功
-1 运行失败（启动、健康检查、更新）
+1 运行失败（启动、健康检查、更新、search/fetch 数据面失败）
 2 参数错误
 3 未安装（找不到 gateway.yaml 或 data/current）
 4 校验失败 / 冲突
@@ -514,7 +576,9 @@ ENGINE_SECRET_AMBIGUOUS 多个密钥依赖需要 --name 指定
 PLUGIN_UNKNOWN     插件名不存在
 PLUGIN_FAILED      插件安装/卸载失败
 BACKEND_DOWN       需要后端在线但不可达
-SERVICE_DOWN       doctor 检测到服务不可达
+SERVICE_DOWN       gateway 不可达（status 探测、search/fetch 连接失败）
+GATEWAY_UNAUTHORIZED search/fetch 的 MCP 鉴权失败（HTTP 401/403）
+SEARCH_* / FETCH_* 等 search/fetch 工具返回的数据面错误码（原样透传）
 DOWNLOAD_FAILED    下载失败（广告列表等）
 BROWSER_NOT_INSTALLED
 NODE_TOO_OLD

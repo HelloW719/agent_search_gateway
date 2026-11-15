@@ -48,6 +48,12 @@ async function mcpRequest(base: string, body: unknown, opts: { token?: string; s
   return { status: res.status, headers: res.headers, text: await res.text() };
 }
 
+/** POST /mcp 可能回 SSE；取出第一条 data 行的 JSON。 */
+function parseMcpMessage(text: string): any {
+  const line = text.split(/\r?\n/).find((item) => item.startsWith("data: "));
+  return JSON.parse(line ? line.slice("data: ".length) : text);
+}
+
 describe("MCP HTTP server", () => {
   let base = "";
   let closeFn: (() => Promise<void>) | undefined;
@@ -136,6 +142,33 @@ describe("MCP HTTP server", () => {
     );
     // 参数通过校验并走到服务层：searxng 不可达 → 返回「搜索失败」而非参数校验错误
     expect(text).toContain("搜索失败");
+    expect(parseMcpMessage(text).result.isError).toBe(true);
+  });
+
+  it("tools/call fetch 失败时带 isError 标记", async () => {
+    const init = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } },
+      }),
+    });
+    const sessionId = init.headers.get("mcp-session-id")!;
+    const { text } = await mcpRequest(
+      base,
+      {
+        jsonrpc: "2.0",
+        id: 9,
+        method: "tools/call",
+        params: { name: "fetch", arguments: { url: "http://127.0.0.1:1/" } },
+      },
+      { sessionId },
+    );
+    expect(text).toContain("抓取失败");
+    expect(parseMcpMessage(text).result.isError).toBe(true);
   });
 
   it("GET /files/<id> 返回产物，未知 id 404", async () => {

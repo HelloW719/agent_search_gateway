@@ -20,7 +20,7 @@ flaresolverr:
   timeout_ms: 60000        # FlareSolverr 请求超时
   max_concurrent: 2        # 全进程并发上限（保护 FlareSolverr / Chromium；所有 MCP 会话合计）
   trigger_status: [403, 405, 429]   # direct 这些状态 → 升级 FlareSolverr
-  fallback_on_empty: true  # direct 200 但空壳 JS → 升级
+  fallback_on_empty: true  # auto 模式下“正文为空/疑似 JS 空壳”是否自动升级渲染（render=always 不受影响）
 
 search:
   max_results: 10

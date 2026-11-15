@@ -1,5 +1,6 @@
 import { createDocument, type DominoDocument, type DominoElement } from "@mixmark-io/domino";
 import TurndownService from "turndown";
+import { countVisibleChars } from "./content.js";
 
 /** 清理模式：移除的元素选择器 */
 const CLEAN_SELECTORS = [
@@ -66,16 +67,37 @@ function collapseBlankLines(s: string): string {
     .trim();
 }
 
+/** data: URI 图片（尤其 base64）会把上下文撑满；可由调用方换成落盘链接，否则丢弃。 */
+function rewriteInlineDataImages(
+  doc: DominoDocument,
+  resolveImage?: (src: string) => string | undefined,
+): void {
+  each(doc.querySelectorAll("img[src]"), (el) => {
+    const src = el.getAttribute("src") ?? "";
+    if (!/^data:/i.test(src)) return;
+    const replacement = resolveImage?.(src);
+    if (replacement) el.setAttribute("src", replacement);
+    else el.remove();
+  });
+}
+
 export interface HtmlToMdOptions {
   /** clean(去导航/广告) | full(保留完整结构) */
   structural: "clean" | "full";
   baseUrl: string;
   maxOutputChars: number;
+  /**
+   * 把 data: URI 图片转成可用链接（通常落盘后返回 `/files/<id>`）。
+   * 返回 undefined 时丢弃该图片。
+   */
+  resolveImage?: (src: string) => string | undefined;
 }
 
 export interface HtmlToMdResult {
   markdown: string;
   title: string | undefined;
+  /** 截断前的正文可见字符数（不含标题/图片/URL/标点），用于 JS 空壳判定。 */
+  contentChars: number;
 }
 
 /**
@@ -101,6 +123,8 @@ export function htmlToMarkdown(html: string, opts: HtmlToMdOptions): HtmlToMdRes
     }
   }
 
+  rewriteInlineDataImages(doc, opts.resolveImage);
+
   absolutizeUrls(doc, opts.baseUrl);
 
   const td = new TurndownService({
@@ -111,10 +135,11 @@ export function htmlToMarkdown(html: string, opts: HtmlToMdOptions): HtmlToMdRes
 
   let markdown = td.turndown(doc as unknown as Parameters<TurndownService["turndown"]>[0]);
   markdown = collapseBlankLines(markdown);
+  const contentChars = countVisibleChars(markdown);
 
   if (markdown.length > opts.maxOutputChars) {
     markdown = markdown.slice(0, opts.maxOutputChars) + "\n\n…(内容已截断)";
   }
 
-  return { markdown, title };
+  return { markdown, title, contentChars };
 }

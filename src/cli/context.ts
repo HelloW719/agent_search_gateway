@@ -1,6 +1,6 @@
 /** 命令上下文与统一返回类型。 */
 
-import type { Reporter } from "./output.js";
+import type { ErrorPayload, Reporter } from "./output.js";
 
 export interface CommandResult {
   data: unknown;
@@ -8,6 +8,8 @@ export interface CommandResult {
   human?: string;
   /** 覆盖 result.ok；doctor 之类的“报告型”命令用。 */
   ok?: boolean;
+  /** 命令级错误；search/fetch 的数据面失败用它保留上游错误码与文本。 */
+  error?: ErrorPayload;
   /** 覆盖进程退出码；未提供时为 0。 */
   exitCode?: number;
 }

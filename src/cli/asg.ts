@@ -12,6 +12,8 @@ const USAGE = `用法: asg <命令> [选项]
 
 命令:
   status                      三个服务的现场探测
+  search <query> [选项]       对运行中的网关做搜索测试
+  fetch <url> [选项]          对运行中的网关做抓取测试
   start | stop | restart      整栈启停
   serve                       前台 supervisor（供服务管理器调用）
   logs [service...] [-f]      日志；默认合并 gateway + supervisor
@@ -36,6 +38,8 @@ type Loader = () => Promise<CommandFn>;
 
 const COMMANDS: Record<string, Loader> = {
   status: () => import("./commands/status.js").then((m) => m.run),
+  search: () => import("./commands/search.js").then((m) => m.run),
+  fetch: () => import("./commands/fetch.js").then((m) => m.run),
   start: () => import("./commands/start.js").then((m) => m.run),
   stop: () => import("./commands/stop.js").then((m) => m.run),
   restart: () => import("./commands/restart.js").then((m) => m.run),
@@ -104,7 +108,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     const run = await loader();
     const result = await run({ root, reporter, rest });
     reporter.result(
-      { schema_version: 1, ok: result.ok ?? true, command: resultName, data: result.data },
+      {
+        schema_version: 1,
+        ok: result.ok ?? true,
+        command: resultName,
+        data: result.data,
+        ...(result.error ? { error: result.error } : {}),
+      },
       result.human,
     );
     return result.exitCode ?? EXIT.OK;

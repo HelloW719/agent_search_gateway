@@ -4,6 +4,8 @@ import { renderWithPlaywright } from "../browser/render.js";
 import { ErrorCodes, withCode } from "../utils/errors.js";
 import { FetchCache, type RenderMode } from "./cache.js";
 import { baseContentType, formatBytes, renderTextBody } from "./convert.js";
+import { analyzeJsShell, countVisibleChars } from "./content.js";
+import { parseDataImage } from "./data-uri.js";
 import { directFetch, type DirectFetchResult } from "./direct.js";
 import { createFlareSolverrClient, type FlareSolverrClient } from "./flaresolverr.js";
 import { htmlToMarkdown } from "./html2md.js";
@@ -19,9 +21,13 @@ import {
   type FlaresolverrSettings,
 } from "../settings/index.js";
 
+/** fetch 的浏览器渲染策略；默认 auto（内容判空后自动升级）。 */
+export type FetchRenderMode = "auto" | "always" | "never";
+
 export interface FetchParams {
   url: string;
   maxChars?: number;
+  render?: FetchRenderMode;
 }
 
 export interface FetchOutcome {
@@ -50,23 +56,12 @@ export interface FetchServiceDeps {
   };
 }
 
-/** 空壳 JS 判定：HTML 很短且含 script src（疑似 SPA 壳）或含 CF 挑战特征 */
-function isShellJs(html: string): boolean {
-  if (html.length > 2000) return false;
-  const lower = html.toLowerCase();
-  const hasScript = /<script[^>]*\ssrc=/.test(lower);
-  const cfFeatures = /cf-challenge|just a moment|challenge-platform|cf-browser-verification|_cf_chl/.test(lower);
-  return hasScript || cfFeatures;
-}
-
 function shouldUpgradeToFlareSolverr(
   flaresolverr: FlaresolverrSettings,
   direct: DirectFetchResult,
 ): boolean {
   if (!flaresolverr.enabled) return false;
-  if (direct.ok) {
-    return flaresolverr.fallback_on_empty && direct.html !== undefined && isShellJs(direct.html);
-  }
+  if (direct.ok) return false;
   if (direct.errorKind === "http" && direct.status !== undefined) {
     return flaresolverr.trigger_status.includes(direct.status);
   }
@@ -76,10 +71,33 @@ function shouldUpgradeToFlareSolverr(
 /** max_chars 参数钳制上限：防止 agent 传超大值把整页塞进 LLM context */
 const MAX_OUTPUT_CHARS_LIMIT = 200000;
 
+const RENDER_NOTE = "\n\n> 注：此页面通过浏览器渲染获取。";
+
+/** 内嵌 data: 图片的落盘上限：单张 2MB、单次 10MB / 20 张。 */
+const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_INLINE_IMAGE_TOTAL_BYTES = 10 * 1024 * 1024;
+const MAX_INLINE_IMAGES = 20;
+
 function clampMaxChars(v: number | undefined): number | undefined {
   if (v === undefined) return undefined;
   if (v <= 0) return undefined;
   return Math.min(v, MAX_OUTPUT_CHARS_LIMIT);
+}
+
+interface RenderedHtml {
+  text: string;
+  /** 不含标题的正文 markdown（用于判断是否有图片/链接等非文本内容）。 */
+  markdown: string;
+  /** 截断前的正文可见字符数（不含标题）。 */
+  contentChars: number;
+}
+
+interface BrowserRenderOutcome {
+  ok: boolean;
+  /** 渲染后的 markdown（不含“浏览器渲染获取”注释，便于比较正文长度）。 */
+  text?: string;
+  mode?: "playwright" | "flaresolverr";
+  errors: string[];
 }
 
 export function createFetchService(
@@ -95,17 +113,41 @@ export function createFetchService(
   const fsClient = flareSolverr ?? createFlareSolverrClient({ flaresolverr: deps.flaresolverr, ssrf });
   const cache = new FetchCache(fetchSettings.cache_max_entries, fetchSettings.cache_ttl_ms);
 
-  async function renderWithHtml(html: string, baseUrl: string, maxChars?: number): Promise<string> {
+  async function renderWithHtml(html: string, baseUrl: string, maxChars?: number): Promise<RenderedHtml> {
+    const imageStore = store;
+    let inlineImages = 0;
+    let inlineBytes = 0;
+    const resolveImage = imageStore
+      ? (src: string): string | undefined => {
+          if (inlineImages >= MAX_INLINE_IMAGES) return undefined;
+          const parsed = parseDataImage(src);
+          if (!parsed) return undefined;
+          if (parsed.bytes.length > MAX_INLINE_IMAGE_BYTES) return undefined;
+          if (inlineBytes + parsed.bytes.length > MAX_INLINE_IMAGE_TOTAL_BYTES) return undefined;
+          inlineImages += 1;
+          inlineBytes += parsed.bytes.length;
+          const f = imageStore.put(parsed.bytes, {
+            contentType: parsed.contentType,
+            sourceUrl: baseUrl,
+          });
+          return `${deps.files_base_url}${f.url}`;
+        }
+      : undefined;
+
     const md = htmlToMarkdown(html, {
       structural: fetchSettings.structural,
       baseUrl,
       maxOutputChars: maxChars ?? fetchSettings.max_output_chars,
+      ...(resolveImage ? { resolveImage } : {}),
     });
+    if (inlineImages > 0) {
+      logger.debug(`fetch inline images stored: ${inlineImages} (${inlineBytes} bytes) ${baseUrl}`);
+    }
     const lines: string[] = [];
     if (md.title) lines.push(`# ${md.title}`);
     lines.push("");
     lines.push(md.markdown);
-    return lines.join("\n");
+    return { text: lines.join("\n"), markdown: md.markdown, contentChars: md.contentChars };
   }
 
   function cachedGet(mode: RenderMode, url: string, maxChars?: number): string | undefined {
@@ -186,14 +228,122 @@ export function createFetchService(
     };
   }
 
+  /**
+   * 按偏好顺序尝试 playwright / FlareSolverr，返回第一份非空正文。
+   * CF 挑战页即使有少量文字也不算成功，继续下一个引擎。
+   */
+  async function renderViaBrowser(
+    url: string,
+    maxChars: number | undefined,
+    prefer: "playwright" | "flaresolverr",
+  ): Promise<BrowserRenderOutcome> {
+    const order: Array<"playwright" | "flaresolverr"> = [];
+    if (prefer === "flaresolverr") {
+      if (deps.flaresolverr.enabled) order.push("flaresolverr");
+      if (browserPool?.enabled) order.push("playwright");
+    } else {
+      if (browserPool?.enabled) order.push("playwright");
+      if (deps.flaresolverr.enabled) order.push("flaresolverr");
+    }
+
+    if (order.length === 0) {
+      return { ok: false, errors: ["浏览器渲染未启用"] };
+    }
+
+    const errors: string[] = [];
+    for (const engine of order) {
+      const cached = cachedGet(engine, url, maxChars);
+      if (cached !== undefined) {
+        logger.debug(`fetch cache hit (${engine}): ${url}`);
+        return { ok: true, text: cached, mode: engine, errors };
+      }
+
+      if (engine === "playwright") {
+        logger.debug(`fetch render via playwright: ${url}`);
+        const pw = await renderWithPlaywright(
+          browserPool!,
+          { browser: deps.browser, ssrf },
+          logger,
+          url,
+          { minTextChars: 1 },
+        );
+        if (pw.ok && pw.html) {
+          const md = await renderWithHtml(pw.html, pw.finalUrl ?? url, maxChars);
+          const analysis = analyzeJsShell(pw.html, md.contentChars);
+          if (md.contentChars > 0 && analysis.reason !== "cf") {
+            cachedSet("playwright", url, md.text, maxChars);
+            return { ok: true, text: md.text, mode: "playwright", errors };
+          }
+          errors.push(
+            analysis.reason === "cf" ? "playwright: 仍为 Cloudflare 挑战页" : "playwright: 渲染结果无正文",
+          );
+        } else {
+          errors.push(`playwright: ${pw.errorMessage ?? "失败"}`);
+        }
+        continue;
+      }
+
+      logger.debug(`fetch render via FlareSolverr: ${url}`);
+      const fs = await fsClient.requestGet(url);
+      if (fs.ok) {
+        const md = await renderWithHtml(fs.renderedHtml!, fs.finalUrl ?? url, maxChars);
+        const analysis = analyzeJsShell(fs.renderedHtml!, md.contentChars);
+        if (md.contentChars > 0 && analysis.reason !== "cf") {
+          cachedSet("flaresolverr", url, md.text, maxChars);
+          return { ok: true, text: md.text, mode: "flaresolverr", errors };
+        }
+        errors.push(
+          analysis.reason === "cf" ? "flaresolverr: 仍为 Cloudflare 挑战页" : "flaresolverr: 渲染结果无正文",
+        );
+      } else {
+        errors.push(`flaresolverr: ${fs.errorMessage ?? fs.errorKind ?? "失败"}`);
+      }
+    }
+
+    return { ok: false, errors };
+  }
+
+  /** 403 / 405 / 429：沿用 FlareSolverr 优先、playwright 兜底。 */
+  async function renderBlocked(url: string, maxChars?: number): Promise<FetchOutcome> {
+    const rendered = await renderViaBrowser(url, maxChars, "flaresolverr");
+    if (rendered.ok && rendered.text) {
+      return { ok: true, text: rendered.text + RENDER_NOTE };
+    }
+    const detail = rendered.errors.length > 0 ? `（${rendered.errors.join("；")}）` : "";
+    return {
+      ok: false,
+      code: ErrorCodes.FETCH_RENDER_FAIL,
+      text: withCode(
+        ErrorCodes.FETCH_RENDER_FAIL,
+        `浏览器渲染失败${detail}。目标站可能有强反爬或网络异常。`,
+      ),
+    };
+  }
+
   async function fetch(params: FetchParams): Promise<FetchOutcome> {
     const maxChars = clampMaxChars(params.maxChars);
+    const mode: FetchRenderMode = params.render ?? "auto";
 
-    // 先查 direct 缓存
-    const directCached = cachedGet("direct", params.url, maxChars);
-    if (directCached !== undefined) {
-      logger.debug(`fetch cache hit (direct): ${params.url}`);
-      return { ok: true, text: directCached };
+    // 缓存按模式隔离：auto 缓存“最终选中的结果”，always 只复用渲染结果。
+    if (mode === "auto") {
+      const hit = cachedGet("auto", params.url, maxChars);
+      if (hit !== undefined) {
+        logger.debug(`fetch cache hit (auto): ${params.url}`);
+        return { ok: true, text: hit };
+      }
+    } else if (mode === "never") {
+      const hit = cachedGet("direct", params.url, maxChars);
+      if (hit !== undefined) {
+        logger.debug(`fetch cache hit (direct): ${params.url}`);
+        return { ok: true, text: hit };
+      }
+    } else {
+      const hit =
+        cachedGet("playwright", params.url, maxChars) ?? cachedGet("flaresolverr", params.url, maxChars);
+      if (hit !== undefined) {
+        logger.debug(`fetch cache hit (always): ${params.url}`);
+        return { ok: true, text: hit + RENDER_NOTE };
+      }
     }
 
     // ① direct
@@ -207,102 +357,126 @@ export function createFetchService(
       return renderText(direct, params.url, maxChars);
     }
 
-    // ② CF 判定：命中才升级到 FlareSolverr
-    if (shouldUpgradeToFlareSolverr(deps.flaresolverr, direct)) {
-      // 查 FlareSolverr 缓存
-      const fsCached = cachedGet("flaresolverr", params.url, maxChars);
-      if (fsCached !== undefined) {
-        logger.debug(`fetch cache hit (flaresolverr): ${params.url}`);
-        return { ok: true, text: fsCached };
+    // ② direct 失败：HTTP 状态命中 trigger_status → 浏览器反爬链路
+    if (!direct.ok) {
+      if (mode !== "never" && shouldUpgradeToFlareSolverr(deps.flaresolverr, direct)) {
+        return await renderBlocked(params.url, maxChars);
       }
 
-      logger.debug(`fetch upgrade to FlareSolverr: ${params.url}`);
-      const fs = await fsClient.requestGet(params.url);
-
-      if (fs.ok) {
-        const html = fs.renderedHtml!;
-        const baseUrl = fs.finalUrl ?? params.url;
-        const md = await renderWithHtml(html, baseUrl, maxChars);
-        const full = md + (md.endsWith("\n") ? "" : "\n") + "\n> 注：此页面通过浏览器渲染获取。";
-        cachedSet("flaresolverr", params.url, full, maxChars);
-        return { ok: true, text: full };
+      const msg = direct.errorMessage ?? "未知错误";
+      // 插件自定义错误码（Bilibili 等）优先，避免被包成 FETCH_NETWORK
+      if (direct.errorCode) {
+        const pluginCode = direct.errorCode as (typeof ErrorCodes)[keyof typeof ErrorCodes];
+        logger.debug(`fetch failed (plugin code ${direct.errorCode}): ${params.url}`);
+        return { ok: false, code: pluginCode, text: withCode(pluginCode, msg) };
       }
+      let code: FetchOutcome["code"] = ErrorCodes.FETCH_NETWORK;
+      if (direct.errorKind === "blocked_private_ip") code = ErrorCodes.FETCH_BLOCKED;
+      else if (direct.errorKind === "not_html") code = ErrorCodes.FETCH_NOT_HTML;
+      else if (direct.errorKind === "unsupported_type") code = ErrorCodes.FETCH_UNSUPPORTED_TYPE;
+      else if (direct.errorKind === "too_large") code = ErrorCodes.FETCH_TOO_LARGE;
+      else if (direct.errorKind === "timeout") code = ErrorCodes.FETCH_TIMEOUT;
+      else if (direct.errorKind === "invalid_url") code = ErrorCodes.FETCH_INVALID_URL;
 
-      // FlareSolverr 失败 → ③ playwright 兜底（若启用）
-      if (browserPool?.enabled) {
-        const pwCached = cachedGet("playwright", params.url, maxChars);
-        if (pwCached !== undefined) {
-          logger.debug(`fetch cache hit (playwright): ${params.url}`);
-          return { ok: true, text: pwCached };
-        }
-        logger.debug(`FlareSolverr 失败，尝试 playwright: ${params.url} (${fs.errorKind})`);
-        const pw = await renderWithPlaywright(browserPool, { browser: deps.browser, ssrf }, logger, params.url);
-        if (pw.ok && pw.html) {
-          const md = await renderWithHtml(pw.html, pw.finalUrl ?? params.url, maxChars);
-          const full = md + (md.endsWith("\n") ? "" : "\n") + "\n> 注：此页面通过浏览器渲染获取。";
-          cachedSet("playwright", params.url, full, maxChars);
-          return { ok: true, text: full };
-        }
+      let hint = "";
+      if (direct.errorKind === "too_large") {
+        hint = `\n\n如需下载请调大 fetch.max_download_bytes（当前上限 ${formatBytes(fetchSettings.max_download_bytes)}）。`;
+      } else if (direct.errorKind === "unsupported_type") {
+        hint = "\n\n该内容类型无法处理。";
+      } else if (direct.errorKind === "blocked_private_ip") {
+        hint = "\n\n出于安全考虑已阻止内网地址访问。";
+      } else if (direct.errorKind === "timeout") {
+        hint = "\n\n目标站响应过慢。";
       }
-
-      const code =
-        fs.errorKind === "timeout"
-          ? ErrorCodes.FETCH_TIMEOUT
-          : fs.errorKind === "blocked"
-            ? ErrorCodes.FETCH_BLOCKED
-            : ErrorCodes.FETCH_RENDER_FAIL;
-      const msg = fs.errorMessage ?? "未知错误";
-      logger.debug(`FlareSolverr failed: ${params.url} kind=${fs.errorKind} msg=${msg}`);
-      return {
-        ok: false,
-        code,
-        text: withCode(code, `浏览器渲染失败（${fs.errorKind}）：${msg}\n\n目标站可能有强反爬或网络异常。`),
-      };
+      logger.debug(`fetch failed: ${params.url} kind=${direct.errorKind} msg=${msg}`);
+      return { ok: false, code, text: withCode(code, `抓取失败（${direct.errorKind}${direct.status ? ` ${direct.status}` : ""}）：${msg}${hint}`) };
     }
 
     // ④ direct 成功路径（HTML）
-    if (direct.ok) {
-      const html = direct.html!;
-      const md = await renderWithHtml(html, direct.finalUrl ?? params.url, maxChars);
-      const lines: string[] = [md];
-      if (direct.truncated) {
-        lines.push("");
-        lines.push(`> 注：页面超过 ${(fetchSettings.max_bytes / 1024 / 1024).toFixed(1)}MB，内容已截断。`);
+    const html = direct.html!;
+    const md = await renderWithHtml(html, direct.finalUrl ?? params.url, maxChars);
+    const analysis = analyzeJsShell(html, md.contentChars);
+
+    const directLines: string[] = [md.text];
+    if (direct.truncated) {
+      directLines.push("");
+      directLines.push(`> 注：页面超过 ${(fetchSettings.max_bytes / 1024 / 1024).toFixed(1)}MB，内容已截断。`);
+    }
+    const directFull = directLines.join("\n");
+
+    // 插件自己负责内容；显式 always 也不改写插件结果。
+    const wantRender =
+      direct.plugin === undefined &&
+      (mode === "always" ||
+        (mode === "auto" && analysis.likely && deps.flaresolverr.fallback_on_empty));
+
+    if (!wantRender) {
+      if (direct.plugin === undefined && mode === "never" && analysis.likely) {
+        if (md.markdown.trim().length === 0) {
+          const text = withCode(
+            ErrorCodes.FETCH_RENDER_FAIL,
+            "页面正文为空，疑似依赖 JavaScript 渲染（render=never）。可改用 render=auto 或 render=always。",
+          );
+          return { ok: false, code: ErrorCodes.FETCH_RENDER_FAIL, text };
+        }
+        const text = `${directFull}\n\n> 注：页面疑似依赖 JavaScript；如需完整内容请使用 render=auto 或 render=always。`;
+        cachedSet("direct", params.url, text, maxChars);
+        return { ok: true, text };
       }
-      const full = lines.join("\n");
-      cachedSet("direct", params.url, full, maxChars);
-      logger.debug(`fetch done: ${params.url} (${md.length} chars)`);
-      return { ok: true, text: full };
+
+      if (direct.plugin === undefined && mode === "auto" && analysis.likely) {
+        if (md.markdown.trim().length === 0) {
+          const text = withCode(
+            ErrorCodes.FETCH_RENDER_FAIL,
+            "页面正文为空，疑似依赖 JavaScript；自动渲染已关闭（flaresolverr.fallback_on_empty=false）。可改用 render=always。",
+          );
+          return { ok: false, code: ErrorCodes.FETCH_RENDER_FAIL, text };
+        }
+        const text = `${directFull}\n\n> 注：页面疑似依赖 JavaScript，但自动渲染已关闭（flaresolverr.fallback_on_empty=false）。`;
+        cachedSet("auto", params.url, text, maxChars);
+        return { ok: true, text };
+      }
+
+      cachedSet(mode === "auto" ? "auto" : "direct", params.url, directFull, maxChars);
+      logger.debug(`fetch done: ${params.url} (${md.text.length} chars, render=${mode})`);
+      return { ok: true, text: directFull };
     }
 
-    // direct 失败且不升级 → 返回 direct 错误
-    const msg = direct.errorMessage ?? "未知错误";
-    // 插件自定义错误码（Bilibili 等）优先，避免被包成 FETCH_NETWORK
-    if (direct.errorCode) {
-      const pluginCode = direct.errorCode as (typeof ErrorCodes)[keyof typeof ErrorCodes];
-      logger.debug(`fetch failed (plugin code ${direct.errorCode}): ${params.url}`);
-      return { ok: false, code: pluginCode, text: withCode(pluginCode, msg) };
-    }
-    let code: FetchOutcome["code"] = ErrorCodes.FETCH_NETWORK;
-    if (direct.errorKind === "blocked_private_ip") code = ErrorCodes.FETCH_BLOCKED;
-    else if (direct.errorKind === "not_html") code = ErrorCodes.FETCH_NOT_HTML;
-    else if (direct.errorKind === "unsupported_type") code = ErrorCodes.FETCH_UNSUPPORTED_TYPE;
-    else if (direct.errorKind === "too_large") code = ErrorCodes.FETCH_TOO_LARGE;
-    else if (direct.errorKind === "timeout") code = ErrorCodes.FETCH_TIMEOUT;
-    else if (direct.errorKind === "invalid_url") code = ErrorCodes.FETCH_INVALID_URL;
+    // ③ 浏览器渲染：CF 挑战优先 FlareSolverr，普通 JS 空壳优先本地 playwright。
+    const prefer = analysis.reason === "cf" ? "flaresolverr" : "playwright";
+    const rendered = await renderViaBrowser(params.url, maxChars, prefer);
 
-    let hint = "";
-    if (direct.errorKind === "too_large") {
-      hint = `\n\n如需下载请调大 fetch.max_download_bytes（当前上限 ${formatBytes(fetchSettings.max_download_bytes)}）。`;
-    } else if (direct.errorKind === "unsupported_type") {
-      hint = "\n\n该内容类型无法处理。";
-    } else if (direct.errorKind === "blocked_private_ip") {
-      hint = "\n\n出于安全考虑已阻止内网地址访问。";
-    } else if (direct.errorKind === "timeout") {
-      hint = "\n\n目标站响应过慢。";
+    if (rendered.ok && rendered.text) {
+      const renderedText = rendered.text + RENDER_NOTE;
+      const useRendered = countVisibleChars(rendered.text) > countVisibleChars(directFull);
+      const chosen = useRendered ? renderedText : directFull;
+      // auto 缓存最终结果；always 且 direct 更完整时也写 auto，避免下次重复渲染。
+      if (mode === "auto" || !useRendered) {
+        cachedSet("auto", params.url, chosen, maxChars);
+      }
+      logger.debug(
+        `fetch done: ${params.url} (render=${mode}, used=${useRendered ? rendered.mode : "direct"})`,
+      );
+      return { ok: true, text: chosen };
     }
-    logger.debug(`fetch failed: ${params.url} kind=${direct.errorKind} msg=${msg}`);
-    return { ok: false, code, text: withCode(code, `抓取失败（${direct.errorKind}${direct.status ? ` ${direct.status}` : ""}）：${msg}${hint}`) };
+
+    // 渲染失败：direct 有正文（含图片/链接等非文本内容）就保留，绝不让“渲染失败”把已有内容吞掉。
+    if (md.markdown.trim().length > 0) {
+      const detail = rendered.errors.length > 0 ? `（${rendered.errors.join("；")}）` : "";
+      const text = `${directFull}\n\n> 注：浏览器渲染失败${detail}，已返回直连内容。`;
+      cachedSet(mode === "auto" ? "auto" : "direct", params.url, text, maxChars);
+      return { ok: true, text };
+    }
+
+    const detail = rendered.errors.length > 0 ? `（${rendered.errors.join("；")}）` : "";
+    return {
+      ok: false,
+      code: ErrorCodes.FETCH_RENDER_FAIL,
+      text: withCode(
+        ErrorCodes.FETCH_RENDER_FAIL,
+        `页面疑似依赖 JavaScript 或需要登录，浏览器渲染后仍无正文${detail}。`,
+      ),
+    };
   }
 
   return { fetch };

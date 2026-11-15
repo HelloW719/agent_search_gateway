@@ -447,7 +447,10 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
         minScore: args.min_score,
         numResults: args.num_results,
       });
-      return { content: [{ type: "text" as const, text: result.text }] };
+      return {
+        content: [{ type: "text" as const, text: result.text }],
+        isError: !result.ok,
+      };
     },
   );
 
@@ -455,7 +458,7 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
     "fetch",
     {
       description:
-        "抓取一个 URL。网页（HTML）转 markdown；纯文本/JSON/CSV/XML 直接返回；PDF 抽取正文；图片等二进制文件落盘并返回本地路径与 /files/<id> 下载链接（正文不注入上下文）。网页遇到反爬会自动升级浏览器渲染。\n\n" +
+        "抓取一个 URL。网页（HTML）转 markdown；纯文本/JSON/CSV/XML 直接返回；PDF 抽取正文；图片等二进制文件落盘并返回本地路径与 /files/<id> 下载链接（正文不注入上下文）。网页正文为空或疑似 JS 渲染时会自动升级浏览器渲染（render=auto，默认）；render=always 强制走浏览器，render=never 关闭。\n\n" +
         "B 站视频/专栏 URL 会自动返回结构化摘要（标题、链接、音频直链、封面、简介/正文、UP、统计、分P、评论区链接）。" +
         "评论区链接是 URL 加 #reply（视频）或 #comment（专栏），fetch 它可抓全量评论；再加 q=关键词 可在本地评论库检索。\n\n" +
         "微博 URL 加 ?weibo= 触发：?weibo=post（单条正文/转发 + 图片外链）、?weibo=comments&limit=20（评论）、" +
@@ -474,11 +477,24 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
           .max(200000)
           .optional()
           .describe("输出 markdown 最大字符数（上限 200000）"),
+        render: z
+          .enum(["auto", "always", "never"])
+          .optional()
+          .describe(
+            "浏览器渲染策略：auto（默认，正文为空/疑似 JS 时自动升级）、always（强制渲染）、never（不渲染）",
+          ),
       },
     },
     async (args) => {
-      const result = await fetchService.fetch({ url: args.url, maxChars: args.max_chars });
-      return { content: [{ type: "text" as const, text: result.text }] };
+      const result = await fetchService.fetch({
+        url: args.url,
+        maxChars: args.max_chars,
+        render: args.render,
+      });
+      return {
+        content: [{ type: "text" as const, text: result.text }],
+        isError: !result.ok,
+      };
     },
   );
 

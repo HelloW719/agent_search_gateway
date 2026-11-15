@@ -1,8 +1,13 @@
 import { createServer as createHttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createFetchService } from "../src/fetch/service.js";
 import type { FetchServiceDeps } from "../src/fetch/service.js";
+import type { BrowserPool } from "../src/browser/pool.js";
+import { FetchStore } from "../src/fetch/store.js";
 import { deepMerge, fetchServiceDeps, makeSettings, type DeepPartial } from "./helpers/settings.js";
 import type { Settings } from "../src/settings/index.js";
 import type { Logger } from "../src/logger.js";
@@ -20,6 +25,38 @@ function makeConfig(overrides: DeepPartial<Settings> = {}): FetchServiceDeps {
     fetch: { timeout_ms: 3000, max_bytes: 65536, block_private_ips: false },
   };
   return fetchServiceDeps(makeSettings(deepMerge(base, overrides)));
+}
+
+interface FakeBrowser {
+  pool: BrowserPool;
+  calls: number;
+  html: string;
+  fail?: string;
+}
+
+function makeFakeBrowser(html: string, fail?: string): FakeBrowser {
+  const state: FakeBrowser = { calls: 0, html, fail, pool: undefined as unknown as BrowserPool };
+  state.pool = {
+    enabled: true,
+    acquireSession: async () => ({
+      page: {
+        goto: async () => {
+          if (state.fail) throw new Error(state.fail);
+        },
+        waitForLoadState: async () => {},
+        waitForSelector: async () => {},
+        evaluate: async () => 100,
+        waitForTimeout: async () => {},
+        content: async () => {
+          state.calls += 1;
+          return state.html;
+        },
+        url: () => "https://rendered.example/",
+      },
+      lastActiveAt: Date.now(),
+    }),
+  } as unknown as BrowserPool;
+  return state;
 }
 
 // ---- mock 目标站（direct 路径） ----
@@ -43,6 +80,29 @@ beforeAll(async () => {
       // 空壳 SPA
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end("<html><head><title>SPA</title></head><body><div id='app'></div><script src='/bundle.js'></script></body></html>");
+    } else if (url.pathname === "/spa-big") {
+      // 大体积 SPA 空壳：旧版按 HTML < 2000 字节判断会漏掉
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<html><head><title>大壳 SPA</title></head><body><div id='app'></div><script src='/bundle.js'></script>" +
+          "<script>void 0;</script>".repeat(600) +
+          "</body></html>",
+      );
+    } else if (url.pathname === "/short-static") {
+      // 短静态页：正文短但有正文节点，不应升级
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<html><head><title>短页</title></head><body><p>一句正文</p><script src='/a.js'></script></body></html>");
+    } else if (url.pathname === "/image-shell") {
+      // 只有图片 + script：正文为 0，但 markdown 里有可用图片，不应被当成完全空
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<html><head><title>图页</title></head><body><img src='https://example.com/pic.png'><script src='/a.js'></script></body></html>");
+    } else if (url.pathname === "/data-image") {
+      // data: URI 图片应落盘并换成 /files/<id> 链接
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<html><head><title>内嵌图</title></head><body><p>正文内容足够长，不触发渲染。</p>" +
+          "<img alt='chart' src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='></body></html>",
+      );
     } else if (url.pathname === "/missing404") {
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end("<html><body>not found</body></html>");
@@ -155,6 +215,135 @@ describe("createFetchService 路由", () => {
     if (!r.ok) {
       expect(r.code).toBeDefined();
       expect(r.text.startsWith("[")).toBe(true);
+    }
+  });
+});
+
+describe("fetch JS 渲染判定（render 参数）", () => {
+  const renderedLong =
+    "<html><head><title>渲染页</title></head><body><article><h1>渲染正文</h1><p>" +
+    "浏览器渲染内容".repeat(30) +
+    "</p></article></body></html>";
+
+  it("auto：大体积 SPA 空壳升级 playwright（旧版按 HTML 体积会漏）", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser(renderedLong);
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const before = fsCalled;
+    const r = await svc.fetch({ url: `${targetBase}/spa-big` });
+    expect(r.ok).toBe(true);
+    expect(browser.calls).toBe(1);
+    expect(fsCalled).toBe(before);
+    if (r.ok) {
+      expect(r.text).toContain("渲染正文");
+      expect(r.text).toContain("浏览器渲染获取");
+    }
+  });
+
+  it("auto：短静态页有正文节点，不升级", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser(renderedLong);
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const r = await svc.fetch({ url: `${targetBase}/short-static` });
+    expect(r.ok).toBe(true);
+    expect(browser.calls).toBe(0);
+    if (r.ok) expect(r.text).toContain("一句正文");
+  });
+
+  it("render=never：不渲染，空正文返回 FETCH_RENDER_FAIL", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser(renderedLong);
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const r = await svc.fetch({ url: `${targetBase}/spa-big`, render: "never" });
+    expect(r.ok).toBe(false);
+    expect(browser.calls).toBe(0);
+    if (!r.ok) {
+      expect(r.code).toBe("FETCH_RENDER_FAIL");
+      expect(r.text).toContain("render=never");
+    }
+  });
+
+  it("render=always：正常页也强制渲染", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser(renderedLong);
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const r = await svc.fetch({ url: `${targetBase}/normal`, render: "always" });
+    expect(r.ok).toBe(true);
+    expect(browser.calls).toBe(1);
+    if (r.ok) {
+      expect(r.text).toContain("渲染正文");
+      expect(r.text).toContain("浏览器渲染获取");
+    }
+  });
+
+  it("误判兜底：渲染结果更短时保留 direct 正文", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser("<html><head><title>渲染</title></head><body><p>短</p></body></html>");
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const r = await svc.fetch({ url: `${targetBase}/normal`, render: "always" });
+    expect(r.ok).toBe(true);
+    expect(browser.calls).toBe(1);
+    if (r.ok) {
+      expect(r.text).toContain("正常内容");
+      expect(r.text).not.toContain("浏览器渲染获取");
+    }
+  });
+
+  it("playwright 失败 → FlareSolverr 兜底", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser(renderedLong, "boom");
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const before = fsCalled;
+    const r = await svc.fetch({ url: `${targetBase}/spa-big` });
+    expect(r.ok).toBe(true);
+    expect(fsCalled).toBe(before + 1);
+    if (r.ok) {
+      expect(r.text).toContain("渲染正文");
+      expect(r.text).toContain("浏览器渲染获取");
+    }
+  });
+
+  it("auto + fallback_on_empty=false：不渲染，空正文报错", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase, fallback_on_empty: false } });
+    const browser = makeFakeBrowser(renderedLong);
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const r = await svc.fetch({ url: `${targetBase}/spa-big` });
+    expect(r.ok).toBe(false);
+    expect(browser.calls).toBe(0);
+    if (!r.ok) {
+      expect(r.code).toBe("FETCH_RENDER_FAIL");
+      expect(r.text).toContain("fallback_on_empty=false");
+    }
+  });
+
+  it("仅图片的页面在 render=never 下仍返回 direct，不误报空", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser(renderedLong);
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const r = await svc.fetch({ url: `${targetBase}/image-shell`, render: "never" });
+    expect(r.ok).toBe(true);
+    expect(browser.calls).toBe(0);
+    if (r.ok) {
+      expect(r.text).toContain("https://example.com/pic.png");
+      expect(r.text).toContain("render=auto");
+    }
+  });
+
+  it("data: URI 图片落盘并换成 /files 链接", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fetch-inline-"));
+    try {
+      const store = new FetchStore(dir, 60_000, 10 * 1024 * 1024);
+      const svc = createFetchService(makeConfig(), silentLogger, undefined, store);
+      const r = await svc.fetch({ url: `${targetBase}/data-image` });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        const match = /\/files\/([0-9a-f]{64})/.exec(r.text);
+        expect(match).toBeTruthy();
+        expect(store.get(match![1]!)).toBeTruthy();
+        expect(r.text).not.toContain("data:image");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

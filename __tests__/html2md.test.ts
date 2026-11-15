@@ -58,4 +58,30 @@ describe("htmlToMarkdown", () => {
     expect(r.markdown.length).toBeLessThanOrEqual(220);
     expect(r.markdown).toContain("内容已截断");
   });
+
+  it("丢弃 data: URI 图片", () => {
+    const html = `<html><body><p>正文</p><img src="data:image/png;base64,${"A".repeat(1000)}"><img src="https://e.com/a.png"></body></html>`;
+    const r = htmlToMarkdown(html, { structural: "clean", baseUrl: "https://e.com", maxOutputChars: 10000 });
+    expect(r.markdown).not.toContain("data:image");
+    expect(r.markdown).toContain("https://e.com/a.png");
+  });
+
+  it("data: URI 图片可由 resolveImage 换成落盘链接", () => {
+    const html = `<html><body><img alt="chart" src="data:image/png;base64,AAAA"></body></html>`;
+    const r = htmlToMarkdown(html, {
+      structural: "clean",
+      baseUrl: "https://e.com",
+      maxOutputChars: 10000,
+      resolveImage: (src) => (src.startsWith("data:image/png") ? "http://127.0.0.1:3000/files/abc" : undefined),
+    });
+    expect(r.markdown).toContain("![chart](http://127.0.0.1:3000/files/abc)");
+    expect(r.markdown).not.toContain("data:image");
+  });
+
+  it("contentChars 统计截断前的正文（不含图片/标题）", () => {
+    const html = `<html><head><title>标题</title></head><body><p>正文内容</p><img src="data:image/png;base64,${"A".repeat(5000)}"></body></html>`;
+    const r = htmlToMarkdown(html, { structural: "clean", baseUrl: "https://e.com", maxOutputChars: 2 });
+    expect(r.contentChars).toBe(4);
+    expect(r.markdown.length).toBeLessThan(20);
+  });
 });

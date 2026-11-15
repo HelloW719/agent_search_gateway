@@ -32,7 +32,7 @@ gateway (本服务, :3000/mcp)
 | 工具 | 说明 |
 |---|---|
 | `search` | 搜索网页，返回纯 md（直接回答/纠正/建议/infobox 置顶 + 结果列表）。参数：query/language/safesearch/categories/engines/min_score/num_results/fanout；`categories=images` 时返回图片直链，`science` 时走学术/知网，`search_by_image` 时以图搜图（query 给图片 URL，或 image_path 给本地图片）。`num_results` 上限由 `search.max_results_cap` 决定，超出按上限截断并在结果末尾说明 |
-| `fetch` | 抓取 URL：网页→md；纯文本/JSON/CSV/XML 直接返回；PDF 抽正文；图片等二进制落盘并返回路径与 `/files/<id>` 链接。参数：url/max_chars |
+| `fetch` | 抓取 URL：网页→md；纯文本/JSON/CSV/XML 直接返回；PDF 抽正文；图片等二进制落盘并返回路径与 `/files/<id>` 链接。参数：url/max_chars/render |
 | `browser_navigate` | 浏览器打开 URL，返回无障碍树快照（省 token） |
 | `browser_snapshot` | 当前页无障碍树快照，可选 target 限定 |
 | `browser_take_screenshot` | 截图返回 base64（开关/尺寸可配） |
@@ -376,10 +376,24 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 
 | 响应类型 | 处理 |
 |---|---|
-| `text/html`、`application/xhtml+xml` | 转 markdown（可选清理导航/广告），反爬时自动升级浏览器渲染 |
+| `text/html`、`application/xhtml+xml` | 转 markdown（可选清理导航/广告）；正文为空/疑似 JS 或反爬时自动升级浏览器渲染（`render` 参数可控制） |
 | `text/*`、`application/json`、`application/xml` 等 | 直接返回；JSON 美化、CSV/TSV 转 markdown 表格、XML 包代码块 |
 | `application/pdf` | `unpdf` 抽正文（含页数标注）；扫描件无文本层则落盘 |
 | 图片 / 压缩包 / 其它二进制 | 落盘，返回**本地路径 + `/files/<id>` 链接 + 大小 + sha256**，正文不注入上下文 |
+
+#### JS 渲染策略
+
+`fetch` 默认 `render=auto`：网页转 markdown 后，若正文为空/过短且页面有 JS 特征，自动升级浏览器渲染（playwright 优先，失败再 FlareSolverr）。正常静态页不触发，判定不看 HTML 体积（ADR-0020）。
+
+| `render` | 行为 |
+|---|---|
+| `auto`（默认） | 按正文长度 + script/SPA 标记自动升级；同时保留 direct 与渲染结果，取正文**更长者** |
+| `always` | HTML 一律走浏览器（已知 SPA/AI 强制浏览）；仍与 direct 比较，渲染更短时保留 direct |
+| `never` | 关闭渲染；正文为空时返回 `[FETCH_RENDER_FAIL]` 并提示改用 `auto`/`always` |
+
+自动升级受 `flaresolverr.fallback_on_empty` 总开关控制；显式 `render=always` 不受该开关影响。`render` 只影响 fetch 返回的 markdown，不接管 `browser_*` 会话。
+
+页面内嵌的 `data:` URI 图片不会把 base64 塞进正文：会落盘到 `data/downloads` 并替换成 `/files/<id>` 链接（单张 2MB、单次 10MB / 20 张，超出则省略）。远端 `http(s)` 图片仍原样保留链接。
 
 站点专用取件走**取件插件**：插件按 host 自报匹配、自管会话与逐跳重定向并完成全部下载，`fetch` 只落盘并给出路径/链接（ADR-0007 / 0009）。CNKI 由官方插件 `djasdh/agent-search-gateway-plugin-cnki` 提供（`asg extensions install ...`）：知网摘要页 → `#pdfDown` → 跟随 302 链取 `%PDF` 落盘（不在机构网段、未订购、或该文献只有 HTML 阅读版都会给出可读错误）。
 
@@ -533,6 +547,8 @@ asg update apply --version v0.3.0    # 指定版本
 
 ```bash
 asg status [--json]
+asg search <query> [--categories <a,b>] [--engines <a,b>] [--num-results <n>] [--fanout 1-4] [--image-path <文件>]
+asg fetch <url> [--max-chars <n>] [--render auto|always|never]
 asg start | stop | restart                 # 整栈启停
 asg logs [gateway|searxng|flaresolverr|supervisor|all] [-f]
 asg config get|set|validate
@@ -546,9 +562,20 @@ asg update check|apply
 asg doctor
 ```
 
+数据面冒烟（需要网关已启动）：
+
+```bash
+asg search "OpenAI" --num-results 5
+asg search --categories weibo_hot
+asg fetch https://example.com --max-chars 20000
+asg fetch https://www.douyin.com/ --render always   # 强制浏览器渲染
+asg search "测试" --json          # 带 endpoint / 耗时 / 错误码
+```
+
 约定：
 
 - 生命周期单位是**整栈**，没有单组件重启。
+- `asg search` / `asg fetch` 是只读冒烟命令：调用运行中网关的 MCP 工具，不写配置、不重启；网关没启动会提示先 `asg start`。
 - 改配置或引擎会**整栈重启**，MCP 连接会断开。
 - 配置文件仍是 `gateway.yaml` / `secrets.yaml`；secrets 只从 stdin 写入，不经过 argv。
 - `asg` 不读环境变量定位安装根：从自身位置向上找 `gateway.yaml`。
