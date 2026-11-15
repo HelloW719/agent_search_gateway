@@ -7,7 +7,8 @@
  *   export const engine = exampleProvider;
  *
  * `asg-plugin.json` 需要 `provides: ["search"]`（与 fetch 同时存在时写
- * `["search", "fetch"]`）。
+ * `["search", "fetch"]`），并用 `config_schema` 声明下面的字段。
+ * 约定 manifest id 为 `example`：配置存在 `extensions.example.config`。
  */
 import type {
   EngineProvider, EngineProviderContext, GatewaySearchResult,
@@ -19,27 +20,32 @@ import { hasCategory } from "./sdk/category.js";
 const DEFAULT_BASE_URL = "https://api.example.com";
 const DEFAULT_CATEGORY = "example";
 const DEFAULT_HOT_CATEGORY = "example_hot";
+const DEFAULT_TIMEOUT_MS = 10_000;
 
-/** `config.weibo` 等价位置：`config.example`。 */
-function exampleConfig(ctx: EngineProviderContext): Record<string, unknown> {
-  return asObject(ctx.config.example);
-}
-
-/** `config.search.example`：搜索源自己的开关与参数。 */
-function searchConfig(ctx: EngineProviderContext): Record<string, unknown> {
-  return asObject(asObject(ctx.config.search).example);
+/**
+ * 插件私有配置。
+ *
+ * `ctx.pluginConfig` 已由宿主按 manifest 的 config_schema 校验并补齐默认值，
+ * 这里再做一层防御式读取，方便单测直接构造不完整对象。
+ */
+function pluginConfig(ctx: EngineProviderContext): Readonly<Record<string, unknown>> {
+  return ctx.pluginConfig ?? {};
 }
 
 function baseUrlOf(ctx: EngineProviderContext): string {
-  return nonEmptyString(exampleConfig(ctx).base_url) ?? DEFAULT_BASE_URL;
+  return nonEmptyString(pluginConfig(ctx).base_url) ?? DEFAULT_BASE_URL;
 }
 
 function categoryOf(ctx: EngineProviderContext): string {
-  return nonEmptyString(searchConfig(ctx).category) ?? DEFAULT_CATEGORY;
+  return nonEmptyString(pluginConfig(ctx).category) ?? DEFAULT_CATEGORY;
 }
 
 function hotCategoryOf(ctx: EngineProviderContext): string {
-  return nonEmptyString(searchConfig(ctx).hot_category) ?? DEFAULT_HOT_CATEGORY;
+  return nonEmptyString(pluginConfig(ctx).hot_category) ?? DEFAULT_HOT_CATEGORY;
+}
+
+function timeoutMsOf(ctx: EngineProviderContext): number {
+  return numberOr(pluginConfig(ctx).timeout_ms, DEFAULT_TIMEOUT_MS);
 }
 
 interface Row {
@@ -80,8 +86,7 @@ async function callUpstream(
   ctx: EngineProviderContext,
 ): Promise<GatewaySearchResult> {
   const started = Date.now();
-  const conf = searchConfig(ctx);
-  const timeoutMs = numberOr(conf.timeout_ms, 10_000);
+  const timeoutMs = timeoutMsOf(ctx);
   const url = new URL(hot ? "/hot" : "/search", baseUrlOf(ctx));
   if (!hot) url.searchParams.set("q", query);
   url.searchParams.set("limit", String(limit));
@@ -122,21 +127,19 @@ export const exampleProvider: EngineProvider = {
   name: "example",
   kind: "gateway",
   displayName: "Example",
-  authHint: "检查 example.base_url 与网络连通性。",
+  authHint: "检查 extensions.example.config.base_url 与网络连通性。",
 
   // 声明本引擎负责的类别；宿主按类别分发。
   routing: (ctx) => [`category:${categoryOf(ctx)}`, `category:${hotCategoryOf(ctx)}`],
 
-  requires: ["config:example.enabled"],
+  // 私有配置由 manifest 的 config_schema 声明，不需要核心 settings/schema.ts。
+  enabledPath: ["extensions", "example", "config", "enabled"],
 
-  // enabledPath 指向 gateway.yaml 里可写回的布尔值。
-  enabledPath: ["search", "example", "enabled"],
+  // 前置条件：没有额外密钥/上游开关；用户关闭后由 enabled 处理。
+  available: () => true,
 
-  // 前置条件：上游平台已启用且 base_url 可用。
-  available: (ctx) => exampleConfig(ctx).enabled === true,
-
-  // 引擎自身开关。
-  enabled: (ctx) => searchConfig(ctx).enabled === true,
+  // 引擎自身开关：缺省视为启用。
+  enabled: (ctx) => pluginConfig(ctx).enabled !== false,
 
   runtime: {
     kind: "search",

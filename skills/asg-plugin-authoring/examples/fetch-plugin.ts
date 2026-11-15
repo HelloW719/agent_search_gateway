@@ -10,46 +10,69 @@
  * 因此实现里统一用 `globalThis.fetch`（或把实现留在 plugin.ts）。
  *
  * 依赖的类型来自 `src/sdk/`（从网关复制的契约类型），不要 import 网关包。
+ * 私有配置由 `asg-plugin.json` 的 `config_schema` 声明，存在
+ * `gateway.yaml → extensions.<manifest id>.config`，运行期读 `ctx.pluginConfig`。
  */
 import type { FetchPlugin, FetchPluginContext, FetchPluginResult } from "./sdk/fetch-plugin.js";
 
 const ARTICLE_PATH = /^\/article\/(\d+)(?:\/|$)/;
-const UA =
+const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+interface ExampleConfig {
+  enabled: boolean;
+  timeoutMs: number;
+  userAgent: string;
+}
+
 /**
- * 读取插件自己的配置段（gateway.yaml 里的 `example:`）。
+ * 读取插件自己的配置。
  *
- * 也可以在 `src/sdk/settings.ts` 里补一个 `ExampleSettings` 接口拿到强类型；
- * 这里用防御式读取，保证字段缺失时仍有默认值。
+ * 宿主已按 manifest 的 `config_schema` 校验并补默认值；这里再给一层默认值，
+ * 方便单测直接构造不完整的 `pluginConfig`。不要读 `ctx.settings`：那是核心内置
+ * 实现的配置切片，外部插件不再依赖。
  */
-function exampleSettings(ctx: FetchPluginContext): { enabled: boolean; timeoutMs: number } {
-  const settings = ctx.settings as unknown as Record<string, unknown>;
-  const raw = settings.example;
-  const conf = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+function exampleConfig(ctx: FetchPluginContext): ExampleConfig {
+  const conf = ctx.pluginConfig ?? {};
   return {
     enabled: conf.enabled !== false,
-    timeoutMs: typeof conf.timeout_ms === "number" ? conf.timeout_ms : 15000,
+    timeoutMs:
+      typeof conf.timeout_ms === "number" && Number.isFinite(conf.timeout_ms)
+        ? conf.timeout_ms
+        : DEFAULT_TIMEOUT_MS,
+    userAgent:
+      typeof conf.user_agent === "string" && conf.user_agent.trim().length > 0
+        ? conf.user_agent
+        : DEFAULT_USER_AGENT,
   };
 }
 
 async function fetchArticle(url: URL, ctx: FetchPluginContext): Promise<FetchPluginResult> {
-  const { enabled, timeoutMs } = exampleSettings(ctx);
+  const { enabled, timeoutMs, userAgent } = exampleConfig(ctx);
   if (!enabled) {
     return {
       ok: false,
       finalUrl: url.toString(),
       errorCode: "EXAMPLE_DISABLED",
-      errorMessage: "example 插件未启用（example.enabled=false）",
+      errorMessage: "example 插件未启用（extensions.example.config.enabled=false）",
     };
   }
+
+  // 可选：密钥来自 `secrets.yaml → extensions.<manifest id>.<name>`，用
+  // `asg extensions secret example --name cookie --stdin` 写入。
+  const cookie = ctx.pluginSecrets?.cookie;
 
   let res: Response;
   try {
     // 插件自管 headers / 重定向 / 超时；这里只接受同域跳转。
     res = await globalThis.fetch(url, {
       redirect: "follow",
-      headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml" },
+      headers: {
+        "user-agent": userAgent,
+        accept: "text/html,application/xhtml+xml",
+        ...(cookie ? { cookie } : {}),
+      },
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
@@ -91,7 +114,6 @@ export const examplePlugin: FetchPlugin = {
   name: "example",
   displayName: "Example",
   aliases: ["示例"],
-  settingsKey: "example",
   capabilities: ["article"],
 
   /** 纯 URL 判断：不读配置、不发请求、不抛错。 */
@@ -102,9 +124,9 @@ export const examplePlugin: FetchPlugin = {
   },
 
   /** 统一开关：false 时宿主回退通用抓取。 */
-  enabled: (ctx) => exampleSettings(ctx).enabled,
+  enabled: (ctx) => exampleConfig(ctx).enabled,
 
-  /** 维护面可用性：这里没有额外依赖。 */
+  /** 维护面可用性：这里没有额外依赖；有密钥依赖时可读 ctx.pluginSecrets。 */
   available: () => true,
 
   fetch: fetchArticle,

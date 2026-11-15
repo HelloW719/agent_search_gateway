@@ -9,7 +9,7 @@ export interface FetchPlugin {
   name: string;
   displayName: string;
   aliases?: readonly string[];
-  settingsKey?: string;
+  settingsKey?: string;    // 旧内置实现的设置段；外部插件改用 config_schema
   capabilities: readonly string[];
   requires?: readonly FetchPluginRequirement[];
   channels?: readonly FetchChannel[];
@@ -31,10 +31,13 @@ export interface FetchPlugin {
 ## enabled / available
 
 - `enabled(ctx)`：统一开关。返回 `false` 时宿主跳过插件，回退通用抓取；
-  通常读 `ctx.settings.<plugin>.enabled`。
+  读 `ctx.pluginConfig?.enabled !== false`（默认启用）。
 - `available(ctx)`：只用于维护面（健康检查 / `asg` 列表），**不参与** URL 匹配。
-  常用来检查命令是否存在、密钥是否配置。
+  常用来检查命令是否存在、密钥是否配置（`ctx.pluginSecrets`）。
 - 可选 `enabled` 表示始终启用。
+
+不要在 `ctx.settings.<plugin>` 里读插件配置：那是核心内置实现的切片；外部插件的配置
+由 manifest 的 `config_schema` 声明，存在 `gateway.yaml → extensions.<id>.config`。
 
 ## fetch 结果
 
@@ -63,17 +66,55 @@ export interface FetchPluginResult {
 
 ```ts
 export interface FetchPluginContext {
-  settings: FetchPluginSettings;      // 与 gateway.yaml 同形的切片
-  secrets: FetchPluginSecrets;        // 与 secrets.yaml 同形的切片
-  getSecret(path: string): string | undefined;
+  settings: FetchPluginSettings;      // 核心内置实现使用的 gateway.yaml 切片
+  secrets: FetchPluginSecrets;        // 核心内置实现使用的 secrets.yaml 切片
+  getSecret(path: string): string | undefined; // 内置实现使用
   logger?: Logger;                    // debug/info/warn/error，可缺省
-  pluginConfig?: unknown;             // 外部插件的自定义配置
+  pluginConfig?: Readonly<Record<string, unknown>>; // 插件私有配置（已补默认值、冻结）
+  pluginSecrets?: Record<string, string>;           // 插件密钥（已解析 env:）
 }
 ```
 
-- 设置字段用 snake_case，与 `gateway.yaml` 完全一致；
-- 只声明自己真正读到的字段（结构类型即可，宿主会传完整对象）；
-- 不要读环境变量里的密钥，走 `ctx.secrets` / `ctx.getSecret`。
+- **外部插件只读 `pluginConfig` / `pluginSecrets`**；`settings` / `secrets` / `getSecret()`
+  是核心内置实现的切片，字段随核心变化，不保证稳定。
+- `pluginConfig` 来自 `gateway.yaml → extensions.<manifest id>.config`；manifest 声明了
+  `config_schema` 时一定注入（含默认值），否则只有非空 `config` 才注入，可能是 `undefined`。
+- `pluginSecrets` 来自 `secrets.yaml → extensions.<manifest id>.<name>`，兼容旧的
+  `extensions.<engineId>.<name>`（manifest id 优先）。`env:NAME` 已解析，空值不注入。
+- `match(url)` 不注入配置，只能看 URL；开关与参数放在 `enabled` / `fetch` 里读。
+- 字段名用 snake_case，与 `config_schema` 一致。
+
+## 插件配置与密钥
+
+manifest 示例：
+
+```json
+{
+  "id": "example",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean", "default": true, "description": "总开关" },
+      "timeout_ms": { "type": "integer", "default": 15000, "description": "请求超时（毫秒）" },
+      "user_agent": { "type": "string", "description": "自定义 User-Agent" }
+    }
+  }
+}
+```
+
+命令：
+
+```bash
+asg extensions config example
+asg extensions config example --describe
+asg extensions config example --set timeout_ms=20000
+asg extensions config example --unset user_agent
+asg extensions secret example --name cookie --stdin
+```
+
+- `extensions.<manifest id>.config` 是唯一配置来源；写前校验，失败不落盘；
+- 成功后整栈重启；默认值不写回 `gateway.yaml`；
+- 密钥不进 config，用 `asg extensions secret --stdin`（不回显）。
 
 ## 插件自行负责的事
 
@@ -81,7 +122,7 @@ export interface FetchPluginContext {
 
 - 自己设置 `User-Agent`、`Referer`、Cookie；
 - 自己做逐跳重定向与登录态处理；
-- 自己做大小上限（`fetch.max_download_bytes` 之类）与超时；
+- 自己做大小上限（在 `config_schema` 里声明 `max_bytes` 之类）与超时（`timeout_ms`）；
 - 自己限制目标域名（例如只允许 `*.cnki.net`），避免被摘要页里的外链带出站。
 
 ## 二进制与大文件
@@ -105,4 +146,5 @@ export interface FetchPluginContext {
 - `src/index.ts` 只做再导出，实现放 `src/plugin.ts`（避免 `export const fetch` 遮蔽全局 `fetch`）；
 - 需要 CLI 时复制 `runCliProcess` 到 `src/sdk/cli.ts`，永不 `shell: true`；
 - 需要多后端路由时，把失败映射成稳定错误码，日志只写 debug；
-- 把错误码/端点导出成变量，方便测试指向本地桩服务器。
+- 把错误码/端点导出成变量，方便测试指向本地桩服务器；
+- 配置读取集中到一个 `pluginConfig(ctx)` 函数并给默认值，避免每个分支各写一套。

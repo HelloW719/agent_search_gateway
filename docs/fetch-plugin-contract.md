@@ -113,7 +113,7 @@ interface FetchPlugin {
   name: string;               // 兼容旧日志/结果标注
   displayName: string;
   aliases?: readonly string[];
-  settingsKey?: string;       // 对应设置段，如 "bilibili"
+  settingsKey?: string;       // 旧内置实现的设置段（如 "bilibili"）；外部插件改用 config_schema
   capabilities: readonly string[];
   requires?: readonly FetchPluginRequirement[];
   channels?: readonly FetchChannel[];
@@ -130,7 +130,7 @@ interface FetchPlugin {
 | 方法 | 语义 | 是否参与 `find` |
 | --- | --- | --- |
 | `match(url)` | 纯 URL 判断是否由该插件接管；不读配置、不抛错 | 是 |
-| `enabled(ctx)` | 统一开关（如 `bilibili.enabled`）；返回 false 即跳过并回退通用抓取 | 是 |
+| `enabled(ctx)` | 统一开关（如 `ctx.pluginConfig?.enabled`）；返回 false 即跳过并回退通用抓取 | 是 |
 | `available(ctx)` | 维护面可用性（健康检查 / 列表 / 后续 `asg plugins`） | **否** |
 
 注册表 `find` 的顺序固定为：`enabled` → `match`，任一抛错都视为不接管，
@@ -140,6 +140,42 @@ interface FetchPlugin {
 const plugin = fetchPluginRegistry.find(url, ctx);
 if (plugin) return await fetchViaPlugin(plugin, url, ctx);
 // 否则继续 SSRF 校验 + 通用抓取
+```
+
+### 上下文
+
+```ts
+interface FetchPluginContext extends ChannelContext {
+  settings: FetchPluginSettings;   // 内置实现使用的 gateway.yaml 切片
+  secrets: FetchPluginSecrets;     // 内置实现使用的 secrets.yaml 切片
+  getSecret(path: string): string | undefined;
+  logger?: Logger;
+  pluginConfig?: Readonly<Record<string, unknown>>; // 外部插件私有配置
+  pluginSecrets?: Record<string, string>;           // 外部插件密钥
+}
+```
+
+- **外部插件只读 `ctx.pluginConfig` / `ctx.pluginSecrets`**。`settings` / `secrets` /
+  `getSecret()` 是核心内置实现使用的切片，不属于第三方扩展的稳定契约。
+- `pluginConfig` 来自 `gateway.yaml → extensions.<manifest id>.config`，由 manifest 的
+  `config_schema` 校验并补齐默认值，递归冻结。声明了 schema 时即使没有用户配置也会注入。
+- `pluginSecrets` 来自 `secrets.yaml → extensions.<manifest id>.<name>`，兼容旧的
+  `extensions.<engineId>.<name>`（manifest id 优先）；`env:NAME` 已解析，空值不注入。
+- `match(url)` **不注入配置**：只能看 URL；只有 `enabled` / `available` / `fetch` 能读配置。
+- 未声明 `config_schema` 且没有非空配置/密钥时，插件不会被包装，`ctx.pluginConfig` /
+  `ctx.pluginSecrets` 可能为 `undefined`，插件应自己给默认值。
+
+```ts
+export const examplePlugin: FetchPlugin = {
+  // ...
+  enabled: (ctx) => ctx.pluginConfig?.enabled !== false,
+  async fetch(url, ctx) {
+    const timeoutMs = typeof ctx.pluginConfig?.timeout_ms === "number"
+      ? ctx.pluginConfig.timeout_ms
+      : 15000;
+    // ...
+  },
+};
 ```
 
 ## 密钥：`env:` 引用
@@ -161,12 +197,32 @@ bilibili:
 加载时先 `resolveSecretTree` 解析引用，再执行原有的 `applySecretEnv`
 （`BILIBILI_HTTP_TOKEN` 等固定环境变量仍可覆盖）。
 
-插件读取密钥统一走 `ctx.getSecret(path)`，路径支持带或不带 `secrets.` 前缀：
+内置插件读取密钥统一走 `ctx.getSecret(path)`，路径支持带或不带 `secrets.` 前缀：
 
 ```ts
 ctx.getSecret("secrets.bilibili.http.token");
 ctx.getSecret("bilibili.http.token");
 ```
+
+外部插件不读 `getSecret()`，而是读 `ctx.pluginSecrets`：
+
+```yaml
+# secrets.yaml
+extensions:
+  example-fetch:
+    api_key: env:EXAMPLE_API_KEY
+```
+
+```ts
+const apiKey = ctx.pluginSecrets?.api_key; // 已解析 env:，未配置时 undefined
+```
+
+- 新键是 `extensions.<manifest id>.<name>`；旧的 `extensions.<engineId>.<name>` 继续兼容，
+  同名时 manifest id 优先。
+- 用 `asg extensions secret <id> --name <name> --stdin` 写新键（值只从 stdin 读，不回显）；
+  `asg engines secret <engine>` 仍写旧 engineId 键。
+- `requires` 目前只作为维护面元数据，不参与 `find`；缺密钥时请在 `available()` 里自行判断
+  （或直接让 `fetch()` 返回稳定错误码）。
 
 ## 结果 helper
 
@@ -193,14 +249,20 @@ errorResult(code, message, { status?, finalUrl?, hint? });
 官方插件仓库：`djasdh/agent-search-gateway-plugin-{bilibili,weibo,cnki}`。
 第三方插件按 `docs/extensions.md` 的 manifest 与单文件 ESM 约定发布，核心不再内置平台实现。
 
-1. 在 `src/fetch/platforms.ts` 的 `PLATFORMS` 里登记规范 ID、显示名与别名（仅当需要新平台）。
+1. 在 `src/fetch/platforms.ts` 的 `PLATFORMS` 里登记规范 ID、显示名与别名（仅当需要**新的平台 ID**；
+   插件私有参数不需要改核心，写在 manifest 的 `config_schema` 里）。
 2. 在插件仓库实现 `FetchPlugin`：填写 `id` / `platform` / `name` / `displayName` /
    `capabilities` / `requires`，并实现 `match` 与 `fetch`。
-3. `match` 只做纯 URL 判断；开关写到 `enabled(ctx)`；维护面信息写到
+3. `match` 只做纯 URL 判断；开关与参数读 `ctx.pluginConfig`（如
+   `enabled: (ctx) => ctx.pluginConfig?.enabled !== false`）；维护面信息写到
    `available(ctx)` 与 `requires`；在 `channels` 里声明该平台实际使用的通道。
-4. 插件入口导出命名 `fetch`，由 `asg extensions install` 安装到
+4. 在 `asg-plugin.json` 的 `config_schema` 里声明私有配置；用户用
+   `asg extensions config <id> --set key=value` 修改，密钥用
+   `asg extensions secret <id> --name <name> --stdin` 写入。**不再**需要改核心
+   `settings/schema.ts`；只有新增平台 ID 才需要改 `platforms.ts`。
+5. 插件入口导出命名 `fetch`，由 `asg extensions install` 安装到
    `data/extensions/<id>/`；网关启动时自动加载。
-5. 补测试：URL 匹配、`enabled` 禁用后 `find` 回退、结果字段与错误码。
+6. 补测试：URL 匹配、`enabled` 禁用后 `find` 回退、配置默认值、结果字段与错误码。
 
 注册表会在构造时检查重复 `id`，重复直接 `throw`，避免静默覆盖。
 

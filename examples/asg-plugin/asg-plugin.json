@@ -5,5 +5,26 @@
   "api_version": 1,
   "provides": ["fetch"],
   "entry": "index.mjs",
-  "description": "示例 asg 插件：接管 example.com 的抓取"
+  "description": "示例 asg 插件：接管 example.com 的抓取",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "总开关；false 时回退通用抓取"
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "default": 15000,
+        "minimum": 1000,
+        "maximum": 120000,
+        "description": "单次请求超时（毫秒）"
+      },
+      "user_agent": {
+        "type": "string",
+        "description": "自定义 User-Agent；缺省用示例内置值"
+      }
+    }
+  }
 }

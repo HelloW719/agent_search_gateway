@@ -30,13 +30,126 @@ description: 为 agent-search-gateway（asg）编写、迁移或发布第三方�
    （会被同名绑定遮蔽）。把实现放到 `src/plugin.ts`，入口只做再导出。
 4. 类型可以自由复制：建 `src/sdk/`，把需要的契约类型与运行期工具（`runCliProcess`、
    `Semaphore`、通道常量等）复制进去，不要从宿主 import。
-5. `asg-plugin.json` 是**严格校验**的：只允许 `id/name/version/api_version/provides/entry/platform/description`，
-   多一个字段都会安装失败。
+5. `asg-plugin.json` 是**严格校验**的：只允许 `id/name/version/api_version/provides/entry/platform/description/config_schema`，
+   多一个字段都会校验失败。
 6. 从 **0.3.4** 起，网关内置的 `bilibili` / `weibo` / `cnki` 已迁出为官方插件仓库，
    用户需要安装官方插件（见文末）而不是依赖内置实现。旧版本（≤0.3.3）会把这些 id
    当作内置能力拒绝安装，先升级网关。
 
-## 1. 生成仓库骨架
+## 1. 插件私有配置（`config_schema`）
+
+插件需要的开关、上游地址、超时、上限等，**不要**读 `ctx.settings`，也不要求用户改网关核心
+`settings/schema.ts`。在 manifest 里用可选的 `config_schema` 声明，网关会：
+
+1. 用 schema 校验 `gateway.yaml → extensions.<manifest id>.config`；
+2. 补齐 `default`，把结果递归冻结后注入 `ctx.pluginConfig`；
+3. 校验失败时跳过整个插件（不会 import 入口），只记日志；
+4. 提供 `asg extensions config` / `asg extensions secret` 读写。
+
+### manifest 模板
+
+```json
+{
+  "id": "example",
+  "name": "Example",
+  "version": "0.1.0",
+  "api_version": 1,
+  "provides": ["fetch"],
+  "entry": "index.mjs",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean", "default": true, "description": "总开关" },
+      "base_url": { "type": "string", "description": "上游根地址" },
+      "timeout_ms": {
+        "type": "integer",
+        "default": 15000,
+        "minimum": 1000,
+        "maximum": 120000,
+        "description": "单次请求超时（毫秒）"
+      },
+      "mode": { "type": "string", "enum": ["fast", "full"], "default": "fast", "description": "模式" }
+    }
+  }
+}
+```
+
+### 支持的 schema 子集
+
+- 根必须是 `type: "object"` + `properties`（可为空对象）；
+- 关键字：`type`（object/string/number/integer/boolean/array）、`description`、`default`、
+  `enum`、`minimum`、`maximum`、`minLength`、`maxLength`、`items`、`properties`、
+  `required`、`additionalProperties`；
+- 省略 `additionalProperties` 按 `false`，未知键直接拒绝；
+- 递归深度 ≤ 8（根算第 1 层），节点总数 ≤ 256；
+- 不支持 `$ref`、`pattern`、`oneOf` / `anyOf` / `allOf`、`format`；出现即报错；
+- `default` 必须能通过该节点自己的 schema；
+- `enum` 必须是非空数组，元素只能是字符串、数字或布尔值。
+
+### 读取配置
+
+```ts
+const conf = ctx.pluginConfig ?? {};
+const enabled = conf.enabled !== false;
+const timeoutMs = typeof conf.timeout_ms === "number" ? conf.timeout_ms : 15000;
+```
+
+`match(url)` 不注入配置（只读 URL）；`enabled` / `available` / `fetch` / `routing` /
+`plan` / `search` 才能读。`ctx.settings` / `ctx.config` 是核心内置实现的切片，外部插件不要依赖。
+
+### 密钥
+
+`config` 只放非敏感配置。密钥写 `secrets.yaml → extensions.<manifest id>.<name>`，
+读 `ctx.pluginSecrets`：
+
+```bash
+asg extensions secret example --name api_key --stdin
+```
+
+`pluginSecrets` 同时兼容旧的 `extensions.<engineId>.<name>`（manifest id 优先），
+`env:NAME` 已解析，空值不注入。
+
+### 字段命名规范
+
+统一 snake_case，优先复用核心词汇；发布后不改语义。禁止同义混用：
+
+| 语义 | 统一字段 | 类型 | 避免 |
+| --- | --- | --- | --- |
+| 总开关 | `enabled` | boolean | `enable`、`disabled`、`active` |
+| 上游根地址 | `base_url` | string | `api_base`、`endpoint`、`host` |
+| 超时 | `timeout_ms` | integer | `timeout`、`timeout_sec` |
+| 单次结果上限 | `limit` | integer | `max`、`count`、`page_size` |
+| 分资源上限 | `<resource>_limit` | integer | `limit_<resource>` |
+| 重试次数 | `max_retries` | integer | `retry`、`retries` |
+| 重试退避 | `retry_backoff_ms` | integer | `backoff`、`retry_delay` |
+| 缓存时长 | `cache_ttl_ms` | integer | `ttl`、`cache_seconds` |
+| 字节/字符上限 | `max_bytes` / `max_chars` | integer | `max_size`、`max_length` |
+| 语言 | `languages` | string[] | `lang`、`language` |
+| 类别 | `categories`；单值 `category` | string[] / string | `category_list` |
+| 模式 | `mode` + `enum` | string | `type`、`kind` |
+| 文件/目录 | `*_path` / `*_dir` | string | `*_file`、`*_folder` |
+| 用户代理 | `user_agent` | string | `ua` |
+| 密钥 | 不放 config | — | 一律 `pluginSecrets` |
+
+补充：单位写进后缀；布尔用肯定式；每个字段写 `description`；能安全默认的写 `default`；
+每个 object 层级 `additionalProperties: false`。
+
+### 命令
+
+```bash
+asg extensions config <id>
+asg extensions config <id> --describe
+asg extensions config <id> --get <key>
+asg extensions config <id> --set <key>=<value> [--set ...]
+asg extensions config <id> --unset <key>
+asg extensions secret <id> --name <name> --stdin
+```
+
+写入前校验，失败不落盘；成功后整栈重启。默认值只在运行期补齐，不写回 `gateway.yaml`。
+`asg engines enable/disable` 也可以按 `enabledPath` 写插件自己的 config，例如
+`["extensions", "<manifest id>", "config", "enabled"]`。
+
+## 2. 生成仓库骨架
 
 ```text
 <repo>/
@@ -168,7 +281,7 @@ SHA256SUMS
 
 字段细节见 `references/manifest.md`。
 
-## 2. 实现 fetch（取件插件）
+## 3. 实现 fetch（取件插件）
 
 `src/index.ts`：
 
@@ -185,7 +298,8 @@ export const fetch = examplePlugin;        // 运行期约定：命名导出 fet
 | `id` / `platform` | 规范平台 ID（通常相同） |
 | `name` / `displayName` | 内部名 / 展示名 |
 | `capabilities` | 例如 `["article"]`、`["video", "comments"]`、`["pdf"]` |
-| `aliases?` / `settingsKey?` / `requires?` / `channels?` | 可选元数据 |
+| `aliases?` / `requires?` / `channels?` | 可选元数据 |
+| `settingsKey?` | 旧内置实现的设置段；外部插件不要用，改用 `config_schema` |
 | `match(url)` | **纯 URL 判断**：不读配置、不抛错、不发请求 |
 | `enabled?(ctx)` | 统一开关；返回 false 时宿主跳过插件并回退通用抓取 |
 | `available?(ctx)` | 维护面可用性（健康检查/列表），**不参与** URL 匹配 |
@@ -206,12 +320,13 @@ export const fetch = examplePlugin;        // 运行期约定：命名导出 fet
 }
 ```
 
-`ctx` 提供 `settings`（与 `gateway.yaml` 同形的设置切片）、`secrets`、`getSecret(path)`、
-`logger` 与可选 `pluginConfig`。不要假设宿主帮你处理 cookie/会话/重定向——插件自己管。
+`ctx` 里第三方插件只需要 `pluginConfig`（已补默认值、冻结）、`pluginSecrets`（已解析
+`env:`）与 `logger`。`settings` / `secrets` / `getSecret(path)` 是核心内置实现的切片，
+外部插件不要依赖。不要假设宿主帮你处理 cookie/会话/重定向——插件自己管。
 
 完整可复制示例见 `examples/fetch-plugin.ts`；契约细节见 `references/fetch-plugin.md`。
 
-## 3. 实现 engine（搜索源 / 图搜源）
+## 4. 实现 engine（搜索源 / 图搜源）
 
 `provides` 含 `"search"` 时必须导出 `engine`：
 
@@ -234,10 +349,16 @@ export const engine = weiboProvider;
 | `enabled?(ctx)` | 引擎自身开关；`enabledPath` 指向写入 `gateway.yaml` 的布尔路径 |
 | `runtime` | `{ kind: "search", plan, search }` 或 `{ kind: "reverse_image", search }` |
 
-扩展密钥：在 `requires` 里写 `secret:<name>`，用户执行
-`asg engines secret <engine> --name <name> --stdin` 后，运行期从
-`ctx.pluginSecrets[<name>]` 读取（已解析 `env:NAME`，空值不注入）。没配置时宿主会把
-`available()` 判为 false，插件内部仍应处理密钥缺失。
+扩展密钥：在 `requires` 里写 `secret:<name>`，运行期从 `ctx.pluginSecrets[<name>]`
+读取（已解析 `env:NAME`，空值不注入）。写新键用
+`asg extensions secret <manifest id> --name <name> --stdin`（`extensions.<id>.<name>`），
+写旧键用 `asg engines secret <engine> --name <name> --stdin`
+（`extensions.<engineId>.<name>`，继续兼容）。没配置时宿主会把 `available()` 判为 false，
+插件内部仍应处理密钥缺失。
+
+扩展的 `enabled` 与配置都读 `ctx.pluginConfig`，`enabledPath` 用
+`["extensions", "<manifest id>", "config", "enabled"]`；`asg engines enable/disable`
+会写回同一份配置，不需要核心 `search.<name>.enabled`。
 
 文本源（`gateway.search`）：
 
@@ -272,7 +393,7 @@ runtime: {
 
 完整示例见 `examples/search-engine.ts`；细节见 `references/search-engine.md`。
 
-## 4. 测试
+## 5. 测试
 
 最低要求：
 
@@ -331,7 +452,7 @@ npm test        # build + vitest + node --test
 - 密钥、网络、登录态都从 `ctx` 注入，测试里直接构造设置对象，不依赖网关的 settings loader；
 - 需要指向本地桩服务器时，把端点/策略导出成可变对象（如 `endpoints`、`policy`），测试里改写。
 
-## 5. CI 发布（tag `v*`）
+## 6. CI 发布（tag `v*`）
 
 `.github/workflows/release.yml`：
 
@@ -374,7 +495,7 @@ jobs:
 `version` 必须与 tag 去掉 `v` 后一致；安装器会校验 `SHA256SUMS`，不要手工替换资产。
 细节见 `references/release.md`。
 
-## 6. 发现与安装
+## 7. 发现与安装
 
 - 给 GitHub 仓库加 topic：**`asg-plugin`**（`asg extensions search` 依赖它）；
 - 用户安装：
@@ -392,11 +513,15 @@ asg extensions install djasdh/agent-search-gateway-plugin-weibo@0.1.0
 asg extensions install djasdh/agent-search-gateway-plugin-cnki@0.1.0
 ```
 
-## 7. 交付前检查清单
+## 8. 交付前检查清单
 
 - [ ] `src/index.ts` 导出 `fetch`（以及需要时的 `engine`），且没有遮蔽全局 `fetch`；
 - [ ] `match` 只做 URL 判断，不读配置、不发请求、不抛错；
 - [ ] 没有 import `agent-search-gateway` 或宿主 `node_modules`；
+- [ ] 私有配置已写进 `config_schema`，字段名 snake_case，每个字段有 `description`，
+      能安全默认的写了 `default`，每个 object 层级 `additionalProperties: false`；
+- [ ] 插件只读 `ctx.pluginConfig` / `ctx.pluginSecrets`，没有依赖 `ctx.settings` / `ctx.config`；
+- [ ] 密钥没有放进 `config`，而是走 `asg extensions secret`；
 - [ ] `package.json` 无运行期依赖，`npm run build` 只产出 `index.mjs`；
 - [ ] `asg-plugin.json` 只有允许字段，`api_version: 1`，`version` 与 tag 一致；
 - [ ] `asg-plugin.json`、`package.json` 版本同步；

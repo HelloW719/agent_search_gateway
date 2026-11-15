@@ -284,6 +284,9 @@ asg restart
 ```
 
 - 插件自己声明 `provides`：`fetch` / `search` / 两者；微博插件同时提供 `fetch` 与搜索源。
+- 插件可用可选的 `config_schema` 声明私有配置（默认值、枚举、范围等），用户用
+  `asg extensions config <id> --set key=value` 读写；密钥用
+  `asg extensions secret <id> --name <name> --stdin` 写入（不进 argv）。
 - 安装位置：`data/extensions/<id>/`；卸载用 `asg extensions remove <id>`。
 - 插件与网关同进程运行，没有沙箱；只安装可信来源。
 - 发现：GitHub topic `asg-plugin`；`asg extensions search` 只列仓库，安装仍需显式执行。

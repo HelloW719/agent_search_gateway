@@ -23,15 +23,21 @@ export interface EngineProvider {
 
 ```ts
 export interface EngineProviderContext {
-  config: Record<string, unknown>;   // 与 gateway.yaml 同形
-  secrets: Record<string, unknown>;  // 与 secrets.yaml 同形
-  pluginSecrets?: Record<string, string>; // 扩展密钥（已解析，空值不注入）
+  config: Record<string, unknown>;        // 核心内置实现使用
+  secrets: Record<string, unknown>;       // 核心内置实现使用
+  pluginConfig?: Readonly<Record<string, unknown>>; // 插件私有配置（已补默认值、冻结）
+  pluginSecrets?: Record<string, string>;           // 插件密钥（已解析，空值不注入）
   logger?: Logger;
 }
 ```
 
-运行时传入的 `config` 是切片（例如 `{ search, weibo }`），因此读取时要用
-`asObject(config.weibo).cli` 这类防御式写法，缺失字段要有默认值。
+第三方插件只读 `ctx.pluginConfig` / `ctx.pluginSecrets`。`config` / `secrets` 是宿主给
+核心内置 provider 的切片（运行期只有 `{ search, weibo }` 等），不是稳定契约。
+
+`pluginConfig` 来自 `gateway.yaml → extensions.<manifest id>.config`，由 manifest 的
+`config_schema` 校验并补齐默认值；声明了 schema 时没有用户配置也会收到默认值对象。
+`pluginSecrets` 来自 `secrets.yaml → extensions.<manifest id>.<name>`，兼容旧的
+`extensions.<engineId>.<name>`（manifest id 优先）。
 
 ## 文本源：`gateway.search`
 
@@ -87,34 +93,63 @@ type SourceCall =
 ## enabled / available / enabledPath
 
 - `available(ctx)`：密钥、上游开关等前置条件；**不包含**引擎自己的 enabled；
-- `enabled(ctx)`：引擎自身开关；
-- `enabledPath`：该布尔值在 `gateway.yaml` 中的路径（如 `["search", "weibo", "enabled"]`），
-  `asg` 写回配置时使用；
-- `requires`：人类可读的前置条件，例如 `["config:weibo.enabled"]`；
-  `secret:<name>` 表示扩展密钥，读 `ctx.pluginSecrets[<name>]`，由
-  `asg engines secret <engine> --name <name> --stdin` 写入 `secrets.yaml` 的
-  `extensions.<engineId>.<name>`；缺失时宿主强制 `available()` 为 false。
+- `enabled(ctx)`：引擎自身开关，读 `ctx.pluginConfig?.enabled !== false`；
+- `enabledPath`：该布尔值在 `gateway.yaml` 中的路径；扩展插件用
+  `["extensions", "<manifest id>", "config", "enabled"]`，这样 `asg engines enable/disable`
+  会写回插件自己的 config 段，与 `asg extensions config <id> --set enabled=...` 等价；
+- `requires`：人类可读的前置条件。`secret:<name>` 表示扩展密钥，运行期读
+  `ctx.pluginSecrets[<name>]`；新键是
+  `secrets.yaml → extensions.<manifest id>.<name>`，旧的
+  `extensions.<engineId>.<name>` 继续兼容。
+  - 写新键：`asg extensions secret <manifest id> --name <name> --stdin`；
+  - 写旧键：`asg engines secret <engine> --name <name> --stdin`；
+  - 注意 `asg engines enable` 的依赖检查同样先查新键
+    （`extensions.<manifest id>.<name>`），解析后为空再回退旧 engineId 键；
+    两者任一非空即满足。
 
 ## 示例
 
 见 `examples/search-engine.ts`（文本源）。要点：
 
 ```ts
-routing: (ctx) => [`category:${categoryOf(ctx)}`],
-available: (ctx) => asObject(ctx.config.example).enabled === true,
-enabled: (ctx) => asObject(asObject(ctx.config.search).example).enabled === true,
+const conf = (ctx) => ctx.pluginConfig ?? {};
+
+routing: (ctx) => [`category:${String(conf(ctx).category ?? "example")}`],
+available: () => true,  // 密钥/上游开关等前置条件；不包含 enabled
+enabled: (ctx) => conf(ctx).enabled !== false,
+enabledPath: ["extensions", "example", "config", "enabled"],
 runtime: {
   kind: "search",
-  plan: (categories, ctx) => hasCategory(categories, hotCategoryOf(ctx)) ? { hot: true } : undefined,
+  plan: (categories, ctx) => hasCategory(categories, String(conf(ctx).hot_category ?? "example_hot"))
+    ? { hot: true }
+    : undefined,
   search: async (query, { limit }, ctx) => ({ ok: true, results: await run(query, limit), latencyMs: 0 }),
+}
+```
+
+manifest 里对应声明：
+
+```json
+{
+  "id": "example",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean", "default": true, "description": "总开关" },
+      "base_url": { "type": "string", "default": "https://api.example.com", "description": "上游根地址" },
+      "category": { "type": "string", "default": "example", "description": "普通类别名" },
+      "hot_category": { "type": "string", "default": "example_hot", "description": "热搜类别名" },
+      "timeout_ms": { "type": "integer", "default": 10000, "minimum": 1000, "description": "上游超时（毫秒）" }
+    }
+  }
 }
 ```
 
 ## 调试建议
 
-- 单测直接构造 `{ config, secrets }`，覆盖：
+- 单测直接构造 `{ config: {}, secrets: {}, pluginConfig, pluginSecrets }`，覆盖：
   - `routing()` 的类别列表；
   - `plan()` 的命中/不命中；
-  - `available()` / `enabled()` 的开关组合；
+  - `available()` / `enabled()` 的开关组合与默认值；
   - `search()` 的成功、空结果、错误映射（用假 CLI 或本地 HTTP 桩）。
 - 不要把 `plan` 写成会发请求的实现：它只做类别判断。

@@ -262,7 +262,9 @@ asg fetch <url> [--max-chars <n>] [--render auto|always|never] [--timeout <秒>]
 | 搜索引擎启用/禁用 | `data/deps/searxng/settings.yml` |
 | 引擎路由策略（resident / rotating） | `gateway.yaml` |
 | 扩展引擎路由覆盖 | `gateway.yaml` → `extensions.<engineId>.routing` |
+| 扩展插件私有配置 | `gateway.yaml` → `extensions.<manifest id>.config` |
 | 扩展引擎密钥 | `secrets.yaml` → `extensions.<engineId>.<name>` |
+| 扩展插件密钥（推荐） | `secrets.yaml` → `extensions.<manifest id>.<name>` |
 | 插件命令 | `gateway.yaml` |
 | 广告过滤 level | `gateway.yaml` |
 
@@ -355,6 +357,7 @@ asg engines secret <engine> [--name <name>] --clear
 - `secret` 从引擎 `requires` 推导密钥路径：
   - `secrets.a.b` → 内置密钥，写 `secrets.yaml` 的 `a.b`；
   - `secret:<name>` → 扩展密钥，写 `secrets.yaml` 的 `extensions.<engineId>.<name>`；
+    运行期同时兼容 `extensions.<manifest id>.<name>`（后者优先，可用 `asg extensions secret` 写入，见 5.6.1）；
   - 只有一个可写依赖时可省略 `--name`；多个依赖必须给 `--name`，否则 `ENGINE_SECRET_AMBIGUOUS`（退出码 4）；`--name` 接受完整路径、完整 `secret:name` 或末段短名；
   - 值只从 stdin 读（`--stdin`），不接受位置参数；末尾一个换行会被去掉，空值报错；
   - `--clear` 删除对应路径；引擎没有密钥依赖且未给 `--name` 报 `ENGINE_NO_SECRET`，未知 `--name` 报 `MISSING_SECRET`（均为退出码 4）；
@@ -478,6 +481,8 @@ asg extensions search [query] [--limit N]
 asg extensions install <owner/repo>[@version]
 asg extensions list
 asg extensions remove <id>
+asg extensions config <id> [--get [key]] [--set key=value]... [--unset key]... [--file <path>] [--describe]
+asg extensions secret <id> --name <name> --stdin | --clear
 ```
 
 - 插件在 `asg-plugin.json` 里自行声明 `provides`：`search` / `fetch` / 两者；
@@ -485,7 +490,75 @@ asg extensions remove <id>
 - 安装目录 `<ROOT>/data/extensions/<id>/`，目录存在即视为已安装；`remove` 只删该目录；
 - 官方 id（`bilibili` / `weibo` / `cnki`）与普通第三方 id 一样安装/卸载；
 - 安装/卸载后需要重启网关（`asg restart`）或下次运行 `asg engines` 时生效；不会自动重启；
+- `config` 读写 `gateway.yaml → extensions.<id>.config`；`id` 是 manifest id，不是 engineId；
+  `<id>` 必须指向已安装插件（未安装报 `PLUGIN_UNKNOWN`，manifest 损坏报 `PLUGIN_FAILED`）：
+  - 无参数：输出补齐默认值后的完整配置；
+  - `--get [key]`：取单个字段，支持 `retry.times` 这类点号路径；
+  - `--set key=value` / `--unset key`：都可重复，按书写顺序应用，支持嵌套键；
+  - `--file <path>`：用 YAML/JSON 文件整体替换，不能与 `--set` / `--unset` 同用；
+  - `--describe`：列出 `config_schema` 的顶层字段（类型、必填、默认值、说明）；
+- `config` 写前用插件自己的 `config_schema` 校验；失败返回 `CONFIG_INVALID`（退出码 4），
+  **不写文件、不重启**，原文件保持不变；
+- `config` 写入成功后整栈重启一次；`changed` 只记录真实变化的路径，默认值不落盘；
+- `secret` 写/删 `secrets.yaml → extensions.<id>.<name>`，值只从 stdin 读，末尾一个换行会被去掉；
+  空值、非法名称（要求 `[a-z][a-z0-9_-]*`）报用法错误；`secrets.yaml` 权限固定 `0600`；
+- `secret` 输出不回显明文；写入后整栈重启一次；
 - 运行时加载见 `docs/extensions.md`。
+
+读取 / 描述示例：
+
+```json
+{
+  "id": "demo-fetch",
+  "config": {
+    "base_url": "https://example.test",
+    "enabled": true,
+    "limit": 10
+  },
+  "valid": true
+}
+```
+
+```json
+{
+  "id": "demo-fetch",
+  "fields": [
+    {
+      "key": "enabled",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "总开关"
+    }
+  ]
+}
+```
+
+写入示例：
+
+```json
+{
+  "id": "demo-fetch",
+  "config": {
+    "base_url": "https://example.test",
+    "enabled": true,
+    "limit": 20
+  },
+  "changed": ["extensions.demo-fetch.config.limit"],
+  "restart": "all",
+  "restarted": true
+}
+```
+
+```json
+{
+  "id": "demo-fetch",
+  "name": "api_key",
+  "changed": ["secrets.extensions.demo-fetch.api_key"],
+  "restart": "all",
+  "restarted": true
+}
+```
 
 ### 5.7 浏览器
 

@@ -15,6 +15,7 @@
 | `entry` | 是 | 单个 `.mjs` / `.js` 文件名；不能含 `/`、`\`、`..`、`:`，不能是绝对路径 |
 | `platform` | 否 | 小写字母/数字/`-`；作为 fetch 插件平台回退，缺省用 `id` |
 | `description` | 否 | 任意字符串（建议一句话说明能力） |
+| `config_schema` | 否 | 插件私有配置声明（JSON Schema 子集，见下文）；省略时 `config` 原样透传 |
 
 ## 示例
 
@@ -43,6 +44,66 @@
   "description": "微博取件 + weibo / weibo_hot 搜索源"
 }
 ```
+
+## 私有配置：`config_schema`
+
+插件有自己的配置（开关、超时、上游地址、上限等）时，用 `config_schema` 声明。
+网关会用它校验 `gateway.yaml → extensions.<id>.config`，补齐默认值，再注入
+`ctx.pluginConfig`；没有声明时 `config` 原样透传。
+
+```json
+{
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean", "default": true, "description": "总开关" },
+      "base_url": { "type": "string", "description": "上游根地址" },
+      "timeout_ms": {
+        "type": "integer",
+        "default": 15000,
+        "minimum": 1000,
+        "maximum": 60000,
+        "description": "单次请求超时（毫秒）"
+      },
+      "mode": {
+        "type": "string",
+        "enum": ["fast", "full"],
+        "default": "fast",
+        "description": "抓取模式"
+      }
+    }
+  }
+}
+```
+
+支持的子集：
+
+- 根必须是 `type: "object"` + `properties`（可为空对象）；
+- 关键字：`type`（object/string/number/integer/boolean/array）、`description`、
+  `default`、`enum`、`minimum`、`maximum`、`minLength`、`maxLength`、`items`、
+  `properties`、`required`、`additionalProperties`；
+- 省略 `additionalProperties` 按 `false`（未知键直接拒绝）；
+- 递归深度 ≤ 8（根算第 1 层），节点总数 ≤ 256；
+- 不支持 `$ref`、`pattern`、`oneOf` / `anyOf` / `allOf`、`format`；出现即报错；
+- `default` 必须能通过该节点自己的 schema。
+- `enum` 必须是非空数组，元素只能是字符串、数字或布尔值。
+
+用户侧命令：
+
+```bash
+asg extensions config <id>
+asg extensions config <id> --describe
+asg extensions config <id> --set timeout_ms=20000
+asg extensions secret <id> --name api_key --stdin
+```
+
+配置存 `extensions.<manifest id>.config`（键是 manifest id，不是 engineId）；
+写入前校验，失败不落盘；成功后整栈重启。默认值只在运行期补齐，不写回文件。
+**密钥不要放进 `config`**，一律用 `secrets.yaml → extensions.<id>.<name>`。
+
+字段命名规范见 `../SKILL.md` 的“插件私有配置”一节：统一 snake_case，
+`enabled` / `base_url` / `timeout_ms` / `limit` / `categories` / `mode` / `user_agent`，
+单位写进后缀，布尔用肯定式。
 
 ## provides 与命名导出的对应关系
 

@@ -34,7 +34,32 @@ npm test          # 先构建，再用 node --test 跑冒烟测试
 - `version`：必须与 Release tag 去掉 `v` 后一致；
 - `api_version`：当前固定为 `1`；
 - `provides`：`["search"]`、`["fetch"]` 或两者；
-- `entry`：单个 `.mjs` / `.js` 文件名，不能带路径。
+- `entry`：单个 `.mjs` / `.js` 文件名，不能带路径；
+- `config_schema`（可选）：插件私有配置的 JSON Schema 子集。
+
+## 配置
+
+本示例声明了 `enabled`、`timeout_ms`、`user_agent` 三个字段：
+
+```bash
+# 查看补齐默认值后的配置
+asg extensions config example-fetch
+
+# 查看字段说明
+asg extensions config example-fetch --describe
+
+# 修改 / 删除
+asg extensions config example-fetch --set timeout_ms=20000
+asg extensions config example-fetch --set user_agent=asg-example
+asg extensions config example-fetch --unset user_agent
+
+# 密钥（只从 stdin 读，不回显）
+echo "$EXAMPLE_COOKIE" | asg extensions secret example-fetch --name cookie --stdin
+```
+
+配置落在 `gateway.yaml → extensions.example-fetch.config`，写入前按 `config_schema`
+校验，失败不落盘；成功后整栈重启。运行期插件读 `ctx.pluginConfig`，密钥读
+`ctx.pluginSecrets`；`match()` 不读配置。默认值只在运行期补齐，不写回文件。
 
 ## 发布
 
@@ -57,6 +82,5 @@ asg extensions list
 
 ## 当前限制
 
-当前 asg 只完成插件安装，**不会加载插件代码**，安装后也不会重启网关。
-运行时加载、权限与沙箱会在后续版本接入；在此之前请把本模板当作发布格式与
-命名导出的参考。
+插件代码没有沙箱，与网关同进程运行；只安装可信来源。配置变更需要整栈重启后生效，
+不支持同一插件多实例。运行时加载、权限与沙箱会在后续版本继续收紧。
