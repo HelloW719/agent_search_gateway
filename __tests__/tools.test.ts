@@ -59,7 +59,7 @@ describe("BrowserTools（真实 playwright）", () => {
   beforeAll(() => {
     const cfg = makeConfig();
     pool = new BrowserPool(browserPoolDeps(cfg), silentLogger);
-    tools = new BrowserTools(pool, browserToolDeps(cfg), silentLogger);
+    tools = new BrowserTools(pool, browserToolDeps(cfg));
   });
 
   afterAll(async () => {

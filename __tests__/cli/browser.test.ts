@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Page } from "playwright";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import type { BrowserPool } from "../../src/browser/pool.js";
+import { BrowserTools, MAX_SELECTOR_CHARS, SELECTOR_TIMEOUT_MS } from "../../src/browser/tools.js";
 import type { Reporter } from "../../src/cli/output.js";
 import {
   browserStatus,
@@ -9,6 +12,7 @@ import {
   playwrightCacheDir,
 } from "../../src/cli/deps/browser.js";
 import type { StreamRunner } from "../../src/cli/deps/plugins.js";
+import { browserToolDeps, makeSettings } from "../helpers/settings.js";
 
 const tempDirs: string[] = [];
 
@@ -140,5 +144,111 @@ describe("browser install 参数", () => {
     await expect(
       installBrowser({ root, full: false, reporter: reporter(), runner }),
     ).rejects.toMatchObject({ code: "BROWSER_NOT_INSTALLED", exitCode: 1 });
+  });
+});
+
+type Recorded = { method: string; args: unknown[] };
+
+/** 假 page：只记录 locator/动作调用，不启动 playwright。 */
+function makeFakePage(opts: { snapshotText?: string; failWith?: Error } = {}): {
+  page: Page;
+  calls: Recorded[];
+} {
+  const calls: Recorded[] = [];
+  const locator = (selector: string) => {
+    calls.push({ method: "locator", args: [selector] });
+    const handle = {
+      first: () => handle,
+      click: async (options?: unknown) => {
+        calls.push({ method: "click", args: [options] });
+        if (opts.failWith) throw opts.failWith;
+      },
+      fill: async (text: string, options?: unknown) => {
+        calls.push({ method: "fill", args: [text, options] });
+        if (opts.failWith) throw opts.failWith;
+      },
+      waitFor: async (options?: unknown) => {
+        calls.push({ method: "waitFor", args: [options] });
+        if (opts.failWith) throw opts.failWith;
+      },
+      ariaSnapshot: async () => {
+        calls.push({ method: "ariaSnapshot", args: [] });
+        return opts.snapshotText ?? "snapshot";
+      },
+    };
+    return handle;
+  };
+  return { page: { locator } as unknown as Page, calls };
+}
+
+function makeTools(page: Page, timeoutMs = 30000) {
+  const pool = { acquireSession: async () => ({ page }) } as unknown as BrowserPool;
+  const settings = makeSettings({ browser: { timeout_ms: timeoutMs } });
+  return { tools: new BrowserTools(pool, browserToolDeps(settings)) };
+}
+
+describe("BrowserTools 选择器超时与长度上限", () => {
+  it("超长选择器立即报错且不调用 locator", async () => {
+    const { page, calls } = makeFakePage();
+    const { tools } = makeTools(page);
+    const long = `#${"a".repeat(MAX_SELECTOR_CHARS)}`;
+
+    const results = [
+      await tools.click(long),
+      await tools.type(long, "x"),
+      await tools.snapshot(long),
+    ];
+    for (const r of results) {
+      expect(r.ok).toBe(false);
+      expect(r.error).toBe(`选择器过长（上限 ${MAX_SELECTOR_CHARS} 字符）`);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("click / type 传入的 timeout 不超过 SELECTOR_TIMEOUT_MS", async () => {
+    expect(SELECTOR_TIMEOUT_MS).toBeLessThanOrEqual(8000);
+    const { page, calls } = makeFakePage();
+    const { tools } = makeTools(page);
+
+    await tools.click("#btn");
+    await tools.type("#input", "hello");
+
+    const clickOptions = calls.find((c) => c.method === "click")!.args[0] as { timeout: number };
+    const fillOptions = calls.find((c) => c.method === "fill")!.args[1] as { timeout: number };
+    expect(clickOptions.timeout).toBe(SELECTOR_TIMEOUT_MS);
+    expect(fillOptions.timeout).toBe(SELECTOR_TIMEOUT_MS);
+    expect(clickOptions.timeout).toBeLessThanOrEqual(8000);
+  });
+
+  it("全局超时更小时取全局值", async () => {
+    const { page, calls } = makeFakePage();
+    const { tools } = makeTools(page, 3000);
+
+    await tools.click("#btn");
+
+    const clickOptions = calls.find((c) => c.method === "click")!.args[0] as { timeout: number };
+    expect(clickOptions.timeout).toBe(3000);
+  });
+
+  it("snapshot(target) 用受限超时等待选择器", async () => {
+    const { page, calls } = makeFakePage();
+    const { tools } = makeTools(page);
+
+    const r = await tools.snapshot("#result");
+    expect(r.ok).toBe(true);
+    const waitOptions = calls.find((c) => c.method === "waitFor")!.args[0] as { timeout: number };
+    expect(waitOptions.timeout).toBe(SELECTOR_TIMEOUT_MS);
+  });
+
+  it("选择器超时时返回 playwright 原文错误", async () => {
+    const timeoutErr = Object.assign(new Error("locator.click: Timeout 8000ms exceeded."), {
+      name: "TimeoutError",
+    });
+    const { page } = makeFakePage({ failWith: timeoutErr });
+    const { tools } = makeTools(page);
+
+    const r = await tools.click("#btn");
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("locator.click: Timeout 8000ms exceeded.");
   });
 });

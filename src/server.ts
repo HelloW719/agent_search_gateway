@@ -370,11 +370,10 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
     fetchStore,
     flareSolverr,
   );
-  const browserTools = new BrowserTools(
-    browserPool,
-    { browser: settings.browser, ssrf: ssrfOf(settings.fetch) },
-    logger,
-  );
+  const browserTools = new BrowserTools(browserPool, {
+    browser: settings.browser,
+    ssrf: ssrfOf(settings.fetch),
+  });
 
   server.registerTool(
     "health",

@@ -1,6 +1,5 @@
 import type { Page } from "playwright";
 import type { BrowserPool } from "./pool.js";
-import type { Logger } from "../logger.js";
 import { assertPublicHttpUrl } from "../fetch/ssrf.js";
 import { pageScreenshot, pageSnapshot } from "./snapshot.js";
 import type { BrowserSettings, SsrfSettings } from "../settings/index.js";
@@ -18,6 +17,12 @@ export interface ToolResult {
   error?: string;
 }
 
+/** 选择器类操作（click / type / snapshot(target)）的超时上限：选择器合法但匹配不到元素时，别卡满全局超时。 */
+export const SELECTOR_TIMEOUT_MS = 8000;
+
+/** 选择器最大字符数：超长选择器（几千字符的后代链等）在 chromium 里解析极慢，直接拒绝。 */
+export const MAX_SELECTOR_CHARS = 500;
+
 function okText(text: string): ToolResult {
   return { ok: true, text };
 }
@@ -26,12 +31,22 @@ function errResult(err: unknown): ToolResult {
   return { ok: false, error: err instanceof Error ? err.message : String(err) };
 }
 
+/** 选择器超长时返回错误结果（不进入 playwright），否则返回 null。 */
+function selectorLengthError(target: string): ToolResult | null {
+  if (target.length <= MAX_SELECTOR_CHARS) return null;
+  return { ok: false, error: `选择器过长（上限 ${MAX_SELECTOR_CHARS} 字符）` };
+}
+
 export class BrowserTools {
   constructor(
     private pool: BrowserPool,
     private deps: BrowserToolSettings,
-    private logger: Logger,
   ) {}
+
+  /** 选择器类操作的超时：全局超时与 SELECTOR_TIMEOUT_MS 取较小值。 */
+  private selectorTimeoutMs(): number {
+    return Math.min(this.deps.browser.timeout_ms, SELECTOR_TIMEOUT_MS);
+  }
 
   async navigate(url: string): Promise<ToolResult> {
     if (!this.pool.enabled) return errResult(new Error("浏览器功能未启用"));
@@ -59,8 +74,19 @@ export class BrowserTools {
   }
 
   async snapshot(target?: string): Promise<ToolResult> {
+    if (target !== undefined) {
+      const tooLong = selectorLengthError(target);
+      if (tooLong) return tooLong;
+    }
     try {
       const { page } = await this.pool.acquireSession();
+      if (target) {
+        // pageSnapshot 透传不了 timeout；先按选择器上限等元素出现，避免 ariaSnapshot 卡满全局超时
+        await page
+          .locator(target)
+          .first()
+          .waitFor({ state: "attached", timeout: this.selectorTimeoutMs() });
+      }
       const snap = await pageSnapshot(page, target);
       if (!snap.ok) return errResult(new Error(snap.error));
       return okText(snap.snapshot!);
@@ -81,9 +107,11 @@ export class BrowserTools {
   }
 
   async click(target: string): Promise<ToolResult> {
+    const tooLong = selectorLengthError(target);
+    if (tooLong) return tooLong;
     try {
       const { page } = await this.pool.acquireSession();
-      await page.locator(target).first().click({ timeout: this.deps.browser.timeout_ms });
+      await page.locator(target).first().click({ timeout: this.selectorTimeoutMs() });
       const snap = await pageSnapshot(page);
       if (!snap.ok) return okText(`已点击 ${target}`);
       return okText(`已点击 ${target}\n\n${snap.snapshot}`);
@@ -93,9 +121,11 @@ export class BrowserTools {
   }
 
   async type(target: string, text: string): Promise<ToolResult> {
+    const tooLong = selectorLengthError(target);
+    if (tooLong) return tooLong;
     try {
       const { page } = await this.pool.acquireSession();
-      await page.locator(target).first().fill(text, { timeout: this.deps.browser.timeout_ms });
+      await page.locator(target).first().fill(text, { timeout: this.selectorTimeoutMs() });
       const snap = await pageSnapshot(page);
       if (!snap.ok) return okText(`已输入 ${target}`);
       return okText(`已输入 ${target}\n\n${snap.snapshot}`);
