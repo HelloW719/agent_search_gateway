@@ -71,6 +71,11 @@ function shouldUpgradeToFlareSolverr(
 /** max_chars 参数钳制上限：防止 agent 传超大值把整页塞进 LLM context */
 const MAX_OUTPUT_CHARS_LIMIT = 200000;
 
+/** 截断标记；capOutput 用它兜住标题、PDF 头、渲染注释等“预算外”文本。 */
+const TRUNCATION_MARKER = "\n\n…(内容已截断)";
+/** 只有 limit 至少能放下标记 + 一点正文时才追加标记，否则直接硬切。 */
+const MIN_MARKER_LIMIT = TRUNCATION_MARKER.length + 10;
+
 const RENDER_NOTE = "\n\n> 注：此页面通过浏览器渲染获取。";
 
 /** 内嵌 data: 图片的落盘上限：单张 2MB、单次 10MB / 20 张。 */
@@ -82,6 +87,36 @@ function clampMaxChars(v: number | undefined): number | undefined {
   if (v === undefined) return undefined;
   if (v <= 0) return undefined;
   return Math.min(v, MAX_OUTPUT_CHARS_LIMIT);
+}
+
+/**
+ * 把最终输出硬性压到 limit 以内。
+ *
+ * 内部各路径（PDF/HTML/文本转换）只截正文，标题、PDF 头、渲染注释、截断提示都算在
+ * 预算之外；这里做最后兜底，保证 `text.length <= limit`。
+ * limit 太小放不下标记时直接切，绝不返回空字符串（limit >= 1 至少 1 个字符）。
+ */
+export function capOutput(text: string, limit: number | undefined): string {
+  if (limit === undefined || text.length <= limit) return text;
+  if (limit >= MIN_MARKER_LIMIT) {
+    return text.slice(0, limit - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+  }
+  return text.slice(0, limit);
+}
+
+/**
+ * 日志/错误文本里抹掉 URL 凭据（https://user:pass@host/ → https://host/），
+ * 防止密码被写进日志。解析失败原样返回（无法安全改写）。
+ */
+export function redactUrl(u: string): string {
+  try {
+    const parsed = new URL(u);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return u;
+  }
 }
 
 interface RenderedHtml {
@@ -320,28 +355,30 @@ export function createFetchService(
     };
   }
 
-  async function fetch(params: FetchParams): Promise<FetchOutcome> {
+  async function runFetch(params: FetchParams): Promise<FetchOutcome> {
     const maxChars = clampMaxChars(params.maxChars);
     const mode: FetchRenderMode = params.render ?? "auto";
+    // 入口统一脱敏一次；后续各路径的 URL 都经过 directFetch 的凭据检查，不会带 userinfo。
+    const logUrl = redactUrl(params.url);
 
     // 缓存按模式隔离：auto 缓存“最终选中的结果”，always 只复用渲染结果。
     if (mode === "auto") {
       const hit = cachedGet("auto", params.url, maxChars);
       if (hit !== undefined) {
-        logger.debug(`fetch cache hit (auto): ${params.url}`);
+        logger.debug(`fetch cache hit (auto): ${logUrl}`);
         return { ok: true, text: hit };
       }
     } else if (mode === "never") {
       const hit = cachedGet("direct", params.url, maxChars);
       if (hit !== undefined) {
-        logger.debug(`fetch cache hit (direct): ${params.url}`);
+        logger.debug(`fetch cache hit (direct): ${logUrl}`);
         return { ok: true, text: hit };
       }
     } else {
       const hit =
         cachedGet("playwright", params.url, maxChars) ?? cachedGet("flaresolverr", params.url, maxChars);
       if (hit !== undefined) {
-        logger.debug(`fetch cache hit (always): ${params.url}`);
+        logger.debug(`fetch cache hit (always): ${logUrl}`);
         return { ok: true, text: hit + RENDER_NOTE };
       }
     }
@@ -367,7 +404,7 @@ export function createFetchService(
       // 插件自定义错误码（Bilibili 等）优先，避免被包成 FETCH_NETWORK
       if (direct.errorCode) {
         const pluginCode = direct.errorCode as (typeof ErrorCodes)[keyof typeof ErrorCodes];
-        logger.debug(`fetch failed (plugin code ${direct.errorCode}): ${params.url}`);
+        logger.debug(`fetch failed (plugin code ${direct.errorCode}): ${logUrl}`);
         return { ok: false, code: pluginCode, text: withCode(pluginCode, msg) };
       }
       let code: FetchOutcome["code"] = ErrorCodes.FETCH_NETWORK;
@@ -388,7 +425,7 @@ export function createFetchService(
       } else if (direct.errorKind === "timeout") {
         hint = "\n\n目标站响应过慢。";
       }
-      logger.debug(`fetch failed: ${params.url} kind=${direct.errorKind} msg=${msg}`);
+      logger.debug(`fetch failed: ${logUrl} kind=${direct.errorKind} msg=${redactUrl(msg)}`);
       return { ok: false, code, text: withCode(code, `抓取失败（${direct.errorKind}${direct.status ? ` ${direct.status}` : ""}）：${msg}${hint}`) };
     }
 
@@ -438,7 +475,7 @@ export function createFetchService(
       }
 
       cachedSet(mode === "auto" ? "auto" : "direct", params.url, directFull, maxChars);
-      logger.debug(`fetch done: ${params.url} (${md.text.length} chars, render=${mode})`);
+      logger.debug(`fetch done: ${logUrl} (${md.text.length} chars, render=${mode})`);
       return { ok: true, text: directFull };
     }
 
@@ -455,7 +492,7 @@ export function createFetchService(
         cachedSet("auto", params.url, chosen, maxChars);
       }
       logger.debug(
-        `fetch done: ${params.url} (render=${mode}, used=${useRendered ? rendered.mode : "direct"})`,
+        `fetch done: ${logUrl} (render=${mode}, used=${useRendered ? rendered.mode : "direct"})`,
       );
       return { ok: true, text: chosen };
     }
@@ -477,6 +514,16 @@ export function createFetchService(
         `页面疑似依赖 JavaScript 或需要登录，浏览器渲染后仍无正文${detail}。`,
       ),
     };
+  }
+
+  /**
+   * 对外入口：所有成功文本都过一遍 capOutput，保证最终长度 ≤ max_chars。
+   * 缓存里存的是未（外层）截断的文本，读取时在这里统一 cap。
+   */
+  async function fetch(params: FetchParams): Promise<FetchOutcome> {
+    const outcome = await runFetch(params);
+    if (!outcome.ok) return outcome;
+    return { ...outcome, text: capOutput(outcome.text, clampMaxChars(params.maxChars)) };
   }
 
   return { fetch };

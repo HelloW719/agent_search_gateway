@@ -94,6 +94,15 @@ function decodeBody(buf: Buffer, contentType: string, sniff: boolean): string {
 }
 
 /**
+ * 凭据型 URL（https://user:pass@host/）拒绝原因；无凭据返回 null。
+ * 不返回原 URL：错误文本与日志都可能被回显，只需 hostname + pathname 定位目标。
+ */
+function credentialRejectMessage(url: URL): string | null {
+  if (url.username === "" && url.password === "") return null;
+  return `URL 不允许包含用户名或密码（目标 ${url.hostname}${url.pathname}）`;
+}
+
+/**
  * 校验 URL 是否允许抓取：协议必须 http/https，且（启用时）hostname 非内网。
  * 初始 URL 与每次重定向目标都调用 —— 防止 302 跳转绕过 SSRF 检查直达内网。
  */
@@ -104,6 +113,10 @@ async function checkUrlAllowed(
   | { ok: true }
   | { ok: false; errorKind: "invalid_url" | "blocked_private_ip"; errorMessage: string }
 > {
+  const credentialMessage = credentialRejectMessage(url);
+  if (credentialMessage) {
+    return { ok: false, errorKind: "invalid_url", errorMessage: credentialMessage };
+  }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return { ok: false, errorKind: "invalid_url", errorMessage: `仅支持 http/https: ${url.toString()}` };
   }
@@ -258,6 +271,12 @@ export async function directFetch(
     url = new URL(urlStr);
   } catch {
     return { ok: false, errorKind: "invalid_url", errorMessage: `非法 URL: ${urlStr}` };
+  }
+
+  // 入口即拒绝凭据型 URL：既避免 fetch 的 TypeError 回显密码，也不把凭据交给取件插件。
+  const credentialMessage = credentialRejectMessage(url);
+  if (credentialMessage) {
+    return { ok: false, errorKind: "invalid_url", errorMessage: credentialMessage };
   }
 
   // 取件插件优先（ADR-0007 D5）：匹配表由插件提供，网关无条件信任。

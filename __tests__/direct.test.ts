@@ -162,6 +162,16 @@ describe("directFetch", () => {
     expect(r.errorKind).toBe("invalid_url");
   });
 
+  it("含凭据的 URL 拒绝且不回显密码", async () => {
+    const r = await directFetch(makeConfig(), "https://user:sekret123@example.com/");
+    expect(r.ok).toBe(false);
+    expect(r.errorKind).toBe("invalid_url");
+    expect(r.errorMessage).toContain("URL 不允许包含用户名或密码");
+    expect(r.errorMessage).not.toContain("sekret123");
+    // 只回显 hostname + pathname，便于定位目标
+    expect(r.errorMessage).toContain("example.com/");
+  });
+
   it("自定义 User-Agent 生效", async () => {
     const r = await directFetch(makeConfig({ fetch: { user_agent: "CustomAgent/1.0" } }), `${base}/ua`);
     expect(r.ok).toBe(true);

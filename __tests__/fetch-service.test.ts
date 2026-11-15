@@ -4,11 +4,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createFetchService } from "../src/fetch/service.js";
+import { createFetchService, redactUrl, capOutput } from "../src/fetch/service.js";
 import type { FetchServiceDeps } from "../src/fetch/service.js";
 import type { BrowserPool } from "../src/browser/pool.js";
 import { FetchStore } from "../src/fetch/store.js";
 import { deepMerge, fetchServiceDeps, makeSettings, type DeepPartial } from "./helpers/settings.js";
+import { makeMinimalPdf } from "./helpers/pdf-fixture.js";
 import type { Settings } from "../src/settings/index.js";
 import type { Logger } from "../src/logger.js";
 
@@ -106,6 +107,18 @@ beforeAll(async () => {
     } else if (url.pathname === "/missing404") {
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end("<html><body>not found</body></html>");
+    } else if (url.pathname === "/status500") {
+      res.writeHead(500, { "Content-Type": "text/html" });
+      res.end("<html><body>server error</body></html>");
+    } else if (url.pathname === "/status304") {
+      res.writeHead(304);
+      res.end();
+    } else if (url.pathname === "/empty204") {
+      res.writeHead(204);
+      res.end();
+    } else if (url.pathname === "/pdf") {
+      res.writeHead(200, { "Content-Type": "application/pdf" });
+      res.end(makeMinimalPdf("Hello PDF Gateway"));
     } else {
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end("<html><body>ok</body></html>");
@@ -345,5 +358,100 @@ describe("fetch JS 渲染判定（render 参数）", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("URL 凭据脱敏", () => {
+  const CRED_URL = "https://user:sekret@example.com/";
+
+  function makeCapturingLogger(): { logger: Logger; lines: string[] } {
+    const lines: string[] = [];
+    const logger = {
+      debug: (m: string) => lines.push(m),
+      info: (m: string) => lines.push(m),
+      warn: (m: string) => lines.push(m),
+      error: (m: string) => lines.push(m),
+      close: () => {},
+    } as unknown as Logger;
+    return { logger, lines };
+  }
+
+  it("带凭据的 URL → FETCH_INVALID_URL，文本不含密码", async () => {
+    const svc = createFetchService(makeConfig(), silentLogger);
+    const r = await svc.fetch({ url: CRED_URL });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("FETCH_INVALID_URL");
+      expect(r.text).toContain("URL 不允许包含用户名或密码");
+      expect(r.text).not.toContain("sekret");
+    }
+  });
+
+  it("带凭据的 URL 不升级 FlareSolverr / 浏览器", async () => {
+    const cfg = makeConfig({ flaresolverr: { url: fsBase } });
+    const browser = makeFakeBrowser("<html><body><p>不应该出现</p></body></html>");
+    const svc = createFetchService(cfg, silentLogger, browser.pool);
+    const before = fsCalled;
+    const r = await svc.fetch({ url: CRED_URL, render: "always" });
+    expect(r.ok).toBe(false);
+    expect(fsCalled).toBe(before);
+    expect(browser.calls).toBe(0);
+  });
+
+  it("日志里不出现密码", async () => {
+    const { logger, lines } = makeCapturingLogger();
+    const svc = createFetchService(makeConfig(), logger);
+    await svc.fetch({ url: CRED_URL });
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.join("\n")).not.toContain("sekret");
+    expect(lines.join("\n")).toContain("example.com/");
+  });
+
+  it("redactUrl 清空 username/password，解析失败原样返回", () => {
+    expect(redactUrl("https://user:sekret@example.com/path?q=1")).toBe("https://example.com/path?q=1");
+    expect(redactUrl("https://user@example.com/")).toBe("https://example.com/");
+    expect(redactUrl("not a url")).toBe("not a url");
+  });
+});
+
+describe("输出上限 capOutput / max_chars 硬上限", () => {
+  it("limit 未定义 → 原样返回", () => {
+    expect(capOutput("abc", undefined)).toBe("abc");
+  });
+
+  it("短文本 → 原样返回", () => {
+    expect(capOutput("abc", 10)).toBe("abc");
+    expect(capOutput("abcde", 5)).toBe("abcde");
+  });
+
+  it("超长文本 → 长度不超过 limit 且带截断标记", () => {
+    const out = capOutput("x".repeat(100), 30);
+    expect(out.length).toBeLessThanOrEqual(30);
+    expect(out.endsWith("…(内容已截断)")).toBe(true);
+    expect(out.startsWith("xxxx")).toBe(true);
+  });
+
+  it("limit=10 → 长度 ≤ 10（放不下标记时直接切）", () => {
+    const out = capOutput("y".repeat(100), 10);
+    expect(out.length).toBeLessThanOrEqual(10);
+    expect(out).not.toContain("内容已截断");
+  });
+
+  it("limit=1 → 长度为 1（不返回空字符串）", () => {
+    expect(capOutput("z".repeat(100), 1).length).toBe(1);
+  });
+
+  it("PDF + max_chars=10 → 最终长度 ≤ 10（含标题）", async () => {
+    const svc = createFetchService(makeConfig(), silentLogger);
+    const r = await svc.fetch({ url: `${targetBase}/pdf`, maxChars: 10 });
+    expect(r.ok).toBe(true);
+    expect(r.text.length).toBeLessThanOrEqual(10);
+  });
+
+  it("HTML 有 <title> + max_chars=20 → 最终长度 ≤ 20（标题也在预算内）", async () => {
+    const svc = createFetchService(makeConfig(), silentLogger);
+    const r = await svc.fetch({ url: `${targetBase}/normal`, maxChars: 20 });
+    expect(r.ok).toBe(true);
+    expect(r.text.length).toBeLessThanOrEqual(20);
   });
 });
