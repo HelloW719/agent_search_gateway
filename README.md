@@ -166,7 +166,7 @@ export OPENCLI_CDP_ENDPOINT=http://127.0.0.1:9222
 | `search(query="洛天依", categories="weibo")` | 只搜微博帖子，不查普通网页 |
 | `search(query="", categories="weibo_hot")` | 微博热搜榜 |
 
-- 需要同时开启 `weibo.enabled` 和 `search.weibo.enabled`。
+- 微博能力来自官方扩展：先 `asg extensions install djasdh/agent-search-gateway-plugin-weibo@0.1.0`，并同时开启 `weibo.enabled` 和 `search.weibo.enabled`。
 - 微博源是网关侧文本源，直接调 OpenCLI，不经过 searxng；自定义类别也不会转发给 searxng。
 - 空结果会自动重试一次（搜索页异步加载），结果缓存 60 秒。
 - 微博搜索只保留微博候选，不召回本地语料，避免混入普通网页。
@@ -484,7 +484,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 - `settings.yml` 由一键安装器从 `searxng-ext/settings.template.yml` 渲染；手改后重装会被覆盖，改模板或改生成后的文件并重启
 - 引擎开关用 `asg engines enable/disable <name|group:name>`；searxng 引擎写 settings.yml，网关源写 gateway.yaml，然后整栈重启（会断开 MCP 连接）
 - 引擎路由用 `asg engines route`：searxng 引擎设 `resident` / `rotating` / `none`，文本源设 `--category` / `--hot-category`；密钥用 `asg engines secret <engine> --stdin`（值只从 stdin 读）
-- 裸名冲突时用限定名区分：`searxng:baidu` / `gateway.reverse_image:baidu`；微博搜索用 `gateway.search:weibo`（依赖顶层 `weibo.enabled: true`）
+- 裸名冲突时用限定名区分：`searxng:baidu` / `gateway.reverse_image:baidu`；微博搜索用 `gateway.search:weibo`（需安装官方 weibo 扩展，并开启顶层 `weibo.enabled: true`）
 
 ### 广告过滤（StevenBlack hosts）
 

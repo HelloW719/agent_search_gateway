@@ -1,10 +1,10 @@
 /**
- * gateway.yaml 存储适配器：以图搜图源（search.reverse_image.sources）与微博文本源
- * （search.weibo.enabled）。
+ * gateway.yaml 存储适配器：以图搜图源（search.reverse_image.sources）与
+ * `gateway.search` 扩展源（路由 / 开关）。
  *
  * 引擎元数据（名称 / 可用性 / routing / requires）来自 `src/engines/registry.ts`；
- * 本 store 只负责 YAML 的读取与写入计划。顶层 `weibo.enabled` 是运行能力开关，
- * 归 `asg config`，引擎命令只读不写。
+ * 微博 / B 站 / 知网等平台能力由官方扩展提供，`weibo.enabled` 与 `search.weibo.*`
+ * 是扩展读取的配置面（requires: config:weibo.enabled），核心不内置实现。
  */
 
 import { documentToText, setYamlPath } from "../../config/gateway.js";

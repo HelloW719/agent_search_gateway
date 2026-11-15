@@ -647,6 +647,7 @@ export function createSearchService(
     tStart: number,
   ): Promise<SearchOutcome> {
     const requested = params.numResults ?? search.max_results;
+    // `search.weibo.limit` 是扩展文本源的兼容上限（默认 10），核心不再内置微博实现。
     const limit = Math.min(requested, search.max_results_cap, search.weibo.limit);
     const query = (params.query ?? "").trim();
     const hot = plan.hot;

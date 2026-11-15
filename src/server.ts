@@ -412,7 +412,7 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
     {
       description:
         "搜索网页，返回 markdown 文本结果。查询会聚合多个搜索引擎（searxng），自动过滤广告/垃圾域名，并置顶直接回答/建议等元数据。指定 categories 非 general 类别（如 images、academic）时只走该类别的引擎；images 类别返回图片直链（markdown 图片），可再交给 fetch 落盘。以图搜图用 categories=search_by_image：query 给图片 URL，或改用 image_path 给本地图片路径；会并发走 searxng 的 tineye 与网关侧附加源（trace.moe 动画截图、SauceNAO 插画出处、百度识图中文图），候选按 URL 合并去重。本地图会发布到公网图床以喂 tineye，见 README。\n\n" +
-        "微博：categories=weibo 只搜微博帖子（不查普通网页，query 必填）；categories=weibo_hot 返回微博热搜榜（query 可空）。两者都要求 weibo.enabled 与 search.weibo.enabled 为 true。",
+        "微博 / B 站 / 知网等平台能力由官方扩展提供（asg extensions install 对应插件后重启）：categories=weibo 只搜微博帖子（query 必填）、categories=weibo_hot 返回热搜（query 可空）；未安装扩展时该类别会判为未知。",
       inputSchema: {
         query: z
           .string()
