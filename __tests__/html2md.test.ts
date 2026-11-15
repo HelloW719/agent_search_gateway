@@ -78,6 +78,47 @@ describe("htmlToMarkdown", () => {
     expect(r.markdown).not.toContain("data:image");
   });
 
+  it("clean 不删除 html 根节点（Wikipedia 的 class 命中 [class*='menu']）", () => {
+    // 复刻 https://en.wikipedia.org/wiki/HTTP：根节点 class 含 "main-menu"，正文在 article 里
+    const html = `<html class="vector-feature-main-menu-pinned-disabled"><head><title>HTTP</title></head><body><article><p>超文本传输协议是一种应用层协议。</p></article></body></html>`;
+    const r = htmlToMarkdown(html, { structural: "clean", baseUrl: "https://en.wikipedia.org/wiki/HTTP", maxOutputChars: 10000 });
+    expect(r.markdown).toContain("超文本传输协议");
+    expect(r.contentChars).toBeGreaterThan(0);
+  });
+
+  it("clean 仍删除 body 内的 nav", () => {
+    const html = `<html><body><nav>menu</nav><article><p>正文</p></article></body></html>`;
+    const r = htmlToMarkdown(html, { structural: "clean", baseUrl: "https://e.com", maxOutputChars: 10000 });
+    expect(r.markdown).not.toContain("menu");
+    expect(r.markdown).toContain("正文");
+    expect(r.contentChars).toBe(2);
+  });
+
+  it("clean 误清空时回退到 full（正文容器 class 命中噪音选择器）", () => {
+    const html = `<html><body><div class="menu-wrapper"><article><p>正文</p></article></div></body></html>`;
+    const r = htmlToMarkdown(html, { structural: "clean", baseUrl: "https://e.com", maxOutputChars: 10000 });
+    expect(r.markdown).toContain("正文");
+    expect(r.contentChars).toBe(2);
+  });
+
+  it("真正空页仍返回空正文（不靠 full 兜底误报）", () => {
+    const emptyBody = htmlToMarkdown(`<html><body><div id="app"></div></body></html>`, {
+      structural: "clean",
+      baseUrl: "https://e.com",
+      maxOutputChars: 10000,
+    });
+    expect(emptyBody.markdown).toBe("");
+    expect(emptyBody.contentChars).toBe(0);
+
+    // 纯 JS 空壳：body 里只有 script，full 兜底不应把脚本源码当正文
+    const jsShell = htmlToMarkdown(`<html><body><script>var app = {}</script></body></html>`, {
+      structural: "clean",
+      baseUrl: "https://e.com",
+      maxOutputChars: 10000,
+    });
+    expect(jsShell.contentChars).toBe(0);
+  });
+
   it("contentChars 统计截断前的正文（不含图片/标题）", () => {
     const html = `<html><head><title>标题</title></head><body><p>正文内容</p><img src="data:image/png;base64,${"A".repeat(5000)}"></body></html>`;
     const r = htmlToMarkdown(html, { structural: "clean", baseUrl: "https://e.com", maxOutputChars: 2 });

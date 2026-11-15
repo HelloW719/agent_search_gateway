@@ -30,6 +30,12 @@ const CLEAN_SELECTORS = [
   "[class*='pagination']",
 ];
 
+/**
+ * 永远不会成为可见正文的节点：full 兜底时也要排除，否则纯 script 空壳
+ * 会被当作“有正文”，破坏 JS 空壳判定。
+ */
+const NON_VISIBLE_SELECTORS = ["script", "style", "noscript"];
+
 function absoluteUrl(href: string, base: string): string {
   try {
     return new URL(href, base).toString();
@@ -43,6 +49,35 @@ function each(list: { length: number }, fn: (el: DominoElement, i: number) => vo
   for (let i = 0; i < list.length; i++) {
     const el = (list as unknown as { [k: number]: DominoElement })[i];
     if (el) fn(el, i);
+  }
+}
+
+/** html/body 及其等同节点绝不能被 clean 删除：删掉根节点会连带清空整篇正文。 */
+function isRootElement(el: DominoElement, roots: DominoElement[]): boolean {
+  const tag = (el.tagName ?? "").toLowerCase();
+  if (tag === "html" || tag === "body") return true;
+  return roots.some((root) => root === el);
+}
+
+/**
+ * clean 模式：只在 body 的后代里删噪音节点。
+ *
+ * 直接把选择器跑在整个 document 上会命中根节点自身——例如 Wikipedia 的
+ * `<html class="… vector-feature-main-menu-pinned-disabled …">` 会命中
+ * `[class*='menu']`，`remove()` 之后就只剩空文档。
+ */
+function removeNoiseElements(doc: DominoDocument): void {
+  const body = doc.querySelector("body");
+  const html = doc.querySelector("html");
+  const roots = [html, body].filter((el): el is DominoElement => el !== null);
+
+  for (const sel of CLEAN_SELECTORS) {
+    // `body ${sel}`：匹配范围限定为 body 后代（不含 body 自身）。
+    // 文档没有 body（异常片段）时退回全文档匹配，但仍受 isRootElement 保护。
+    const scoped = body ? `body ${sel}` : sel;
+    each(doc.querySelectorAll(scoped), (el) => {
+      if (!isRootElement(el, roots)) el.remove();
+    });
   }
 }
 
@@ -101,14 +136,18 @@ export interface HtmlToMdResult {
 }
 
 /**
- * HTML → markdown。
- * - domino 解析 DOM
- * - structural=clean 时移除导航/广告等噪音元素
- * - 相对 URL 转绝对
- * - turndown 转换（atx 标题、fenced 代码块）
- * - 压缩空白 + 截断到 maxOutputChars
+ * 单次解析 + 转换：parse →（clean 去噪）→ 图片/URL 规整 → turndown → 折叠空白。
+ * contentChars 在此处（截断前）统计。
+ *
+ * `stripNonVisible` 仅用于 full 兜底 pass：script/style/noscript 的文本不是正文，
+ * 但 full 模式本身不删节点，所以由调用方按需开启。
  */
-export function htmlToMarkdown(html: string, opts: HtmlToMdOptions): HtmlToMdResult {
+function renderMarkdown(
+  html: string,
+  structural: HtmlToMdOptions["structural"],
+  opts: HtmlToMdOptions,
+  stripNonVisible = false,
+): HtmlToMdResult {
   const doc = createDocument(html);
 
   const title = doc.querySelector("title")?.textContent?.trim() || undefined;
@@ -117,8 +156,12 @@ export function htmlToMarkdown(html: string, opts: HtmlToMdOptions): HtmlToMdRes
   const titleEl = doc.querySelector("title");
   if (titleEl) titleEl.remove();
 
-  if (opts.structural === "clean") {
-    for (const sel of CLEAN_SELECTORS) {
+  if (structural === "clean") {
+    removeNoiseElements(doc);
+  }
+
+  if (stripNonVisible) {
+    for (const sel of NON_VISIBLE_SELECTORS) {
       each(doc.querySelectorAll(sel), (el) => el.remove());
     }
   }
@@ -133,13 +176,38 @@ export function htmlToMarkdown(html: string, opts: HtmlToMdOptions): HtmlToMdRes
     bulletListMarker: "-",
   });
 
-  let markdown = td.turndown(doc as unknown as Parameters<TurndownService["turndown"]>[0]);
-  markdown = collapseBlankLines(markdown);
-  const contentChars = countVisibleChars(markdown);
+  const markdown = collapseBlankLines(
+    td.turndown(doc as unknown as Parameters<TurndownService["turndown"]>[0]),
+  );
 
+  return { markdown, title, contentChars: countVisibleChars(markdown) };
+}
+
+/**
+ * HTML → markdown。
+ * - domino 解析 DOM
+ * - structural=clean 时移除导航/广告等噪音元素（仅限 body 后代）
+ * - 相对 URL 转绝对
+ * - turndown 转换（atx 标题、fenced 代码块）
+ * - 压缩空白 + 截断到 maxOutputChars
+ *
+ * clean 结果正文为 0 时，再用同一份 HTML 做一次 full 转换兜底：激进选择器
+ * （`[class*='menu']` 之类）可能把某些站点的正文容器误删，而 full 不做删除。
+ * 兜底 pass 会排除 script/style/noscript 文本，只有确实存在可见正文才采用；
+ * 真正空页（body 无文本 / 纯 JS 空壳）仍返回空。
+ */
+export function htmlToMarkdown(html: string, opts: HtmlToMdOptions): HtmlToMdResult {
+  let result = renderMarkdown(html, opts.structural, opts);
+
+  if (opts.structural === "clean" && result.contentChars === 0) {
+    const full = renderMarkdown(html, "full", opts, true);
+    if (full.contentChars > 0) result = full;
+  }
+
+  let markdown = result.markdown;
   if (markdown.length > opts.maxOutputChars) {
     markdown = markdown.slice(0, opts.maxOutputChars) + "\n\n…(内容已截断)";
   }
 
-  return { markdown, title, contentChars };
+  return { markdown, title: result.title, contentChars: result.contentChars };
 }
