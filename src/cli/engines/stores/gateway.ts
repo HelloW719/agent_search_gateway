@@ -1,6 +1,6 @@
 /**
- * gateway.yaml 存储适配器：以图搜图源（search.reverse_image.sources）与
- * `gateway.search` 扩展源（路由 / 开关）。
+ * gateway.yaml 存储适配器：以图搜图源（search.reverse_image.sources）、
+ * `gateway.search` 扩展源（路由 / 开关）与 `gateway.upstream` 通用上游（开关）。
  *
  * 引擎元数据（名称 / 可用性 / routing / requires）来自 `src/engines/registry.ts`；
  * 微博 / B 站 / 知网等平台能力由官方扩展提供，`weibo.enabled` 与 `search.weibo.*`
@@ -47,8 +47,12 @@ function reverseImageRecords(ctx: EngineContext, providerCtx: EngineProviderCont
   });
 }
 
-function gatewaySearchRecords(providerCtx: EngineProviderContext): EngineRecord[] {
-  return providersForGroup("gateway.search").map((provider) => {
+/** gateway.search 与 gateway.upstream 的启用状态来自 provider.enabled（缺省 true）。 */
+function gatewayProviderRecords(
+  group: "gateway.search" | "gateway.upstream",
+  providerCtx: EngineProviderContext,
+): EngineRecord[] {
+  return providersForGroup(group).map((provider) => {
     const record: EngineRecord = {
       id: provider.id,
       group: provider.group,
@@ -66,11 +70,19 @@ function gatewaySearchRecords(providerCtx: EngineProviderContext): EngineRecord[
 
 export class GatewayStore implements EngineStore {
   readonly id = "gateway.yaml";
-  readonly groups: readonly EngineGroup[] = ["gateway.reverse_image", "gateway.search"];
+  readonly groups: readonly EngineGroup[] = [
+    "gateway.reverse_image",
+    "gateway.search",
+    "gateway.upstream",
+  ];
 
   list(ctx: EngineContext): EngineRecord[] {
     const providerCtx: EngineProviderContext = { config: ctx.configPlain, secrets: ctx.secrets };
-    return [...reverseImageRecords(ctx, providerCtx), ...gatewaySearchRecords(providerCtx)];
+    return [
+      ...reverseImageRecords(ctx, providerCtx),
+      ...gatewayProviderRecords("gateway.search", providerCtx),
+      ...gatewayProviderRecords("gateway.upstream", providerCtx),
+    ];
   }
 
   plan(changes: readonly EngineChange[], ctx: EngineContext): EnginePlan {
@@ -98,10 +110,13 @@ export class GatewayStore implements EngineStore {
     }
 
     const providerCtx: EngineProviderContext = { config: ctx.configPlain, secrets: ctx.secrets };
-    const searchChanges = changes.filter((change) => change.group === "gateway.search");
-    for (const change of searchChanges) {
+    const gatewayChanges = changes.filter(
+      (change) => change.group === "gateway.search" || change.group === "gateway.upstream",
+    );
+    for (const change of gatewayChanges) {
       const provider =
-        engineProvider("gateway.search", change.name) ?? missingProvider(`gateway.search:${change.name}`);
+        engineProvider(change.group, change.name) ??
+        missingProvider(`${change.group}:${change.name}`);
       if (!provider.enabledPath) {
         throw new Error(`引擎 provider 缺少 enabledPath：${provider.id}`);
       }

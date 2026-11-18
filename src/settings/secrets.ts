@@ -34,9 +34,16 @@ const reverseImageSecretsSchema = z
   })
   .strict();
 
+const deepseekSecretsSchema = z
+  .object({
+    api_key: z.string().default(""),
+  })
+  .strict();
+
 const searchSecretsSchema = z
   .object({
     reverse_image: reverseImageSecretsSchema.default(() => reverseImageSecretsSchema.parse({})),
+    deepseek: deepseekSecretsSchema.default(() => deepseekSecretsSchema.parse({})),
   })
   .strict();
 
@@ -108,9 +115,30 @@ const SECRET_ENV: Array<[string, (s: Secrets, v: string) => void]> = [
   ["GATEWAY_TOKEN", (s, v) => void (s.gateway.token = v)],
   ["EMBEDDING_API_KEY", (s, v) => void (s.embedding.api_key = v)],
   ["SAUCENAO_API_KEY", (s, v) => void (s.search.reverse_image.saucenao.api_key = v)],
+  ["DEEPSEEK_API_KEY", (s, v) => void (s.search.deepseek.api_key = v)],
   ["BILIBILI_HTTP_TOKEN", (s, v) => void (s.bilibili.http.token = v)],
   ["BROWSER_PROXY_PASSWORD", (s, v) => void (s.browser.proxy_password = v)],
 ];
+
+/** 内置密钥路径 → 环境变量名；供 CLI 在未落盘密钥时判断依赖是否满足。 */
+export function secretEnvNameForPath(path: readonly string[]): string | undefined {
+  switch (path.join(".")) {
+    case "gateway.token":
+      return "GATEWAY_TOKEN";
+    case "embedding.api_key":
+      return "EMBEDDING_API_KEY";
+    case "search.reverse_image.saucenao.api_key":
+      return "SAUCENAO_API_KEY";
+    case "search.deepseek.api_key":
+      return "DEEPSEEK_API_KEY";
+    case "bilibili.http.token":
+      return "BILIBILI_HTTP_TOKEN";
+    case "browser.proxy_password":
+      return "BROWSER_PROXY_PASSWORD";
+    default:
+      return undefined;
+  }
+}
 
 /** 用非空环境变量覆盖密钥（空值保持 secrets.yaml / 默认值）。 */
 export function applySecretEnv(secrets: Secrets, env: NodeJS.ProcessEnv = process.env): Secrets {

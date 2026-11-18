@@ -13,6 +13,7 @@ import { validateConfigTexts } from "../config/validate.js";
 import { loadEngineContext } from "./context.js";
 import { dig } from "./shared.js";
 import { resolveSecretValue } from "../../settings/secret-ref.js";
+import { secretEnvNameForPath } from "../../settings/secrets.js";
 import { GatewayStore } from "./stores/gateway.js";
 import { SearxngStore } from "./stores/searxng.js";
 import type {
@@ -25,7 +26,12 @@ import type {
 } from "./types.js";
 
 /** 前缀按最长优先匹配。 */
-const GROUP_PREFIXES: readonly EngineGroup[] = ["gateway.reverse_image", "gateway.search", "searxng"];
+const GROUP_PREFIXES: readonly EngineGroup[] = [
+  "gateway.reverse_image",
+  "gateway.upstream",
+  "gateway.search",
+  "searxng",
+];
 
 const STORES: readonly EngineStore[] = [new SearxngStore(), new GatewayStore()];
 
@@ -153,8 +159,15 @@ function requirementSatisfied(
   pluginId?: string,
 ): boolean {
   if (requirement.startsWith("secrets.")) {
-    const value = dig(ctx.secrets, requirement.split(".").slice(1));
-    return typeof value === "string" && value.trim().length > 0;
+    const path = requirement.split(".").slice(1);
+    const value = dig(ctx.secrets, path);
+    // secrets.yaml 支持 env:NAME；判断“是否配置”必须看解析后的值。
+    if (typeof value === "string" && resolveSecretValue(value, process.env).trim().length > 0) {
+      return true;
+    }
+    // 密钥只放在环境变量里（未写入 secrets.yaml）时也要允许 enable。
+    const envName = secretEnvNameForPath(path);
+    return envName !== undefined && (process.env[envName] ?? "").trim().length > 0;
   }
   if (requirement.startsWith("secret:")) {
     const name = requirement.slice("secret:".length);

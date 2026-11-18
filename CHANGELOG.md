@@ -13,6 +13,21 @@
 - 网关侧搜索源鉴权失败映射为 `SEARCH_AUTH_REQUIRED`，不再混入可重试的 `SEARCH_UPSTREAM`。
 - `asg plugins install opencli` 不再尝试同步微博 override（历史遗留，安装版布局下必然跳过）；override 由微博扩展接管。
 
+## [0.3.8] - 2026-11-18
+
+### Added
+
+- 新增 `gateway.upstream` 引擎组与内置 `gateway.upstream:deepseek` 通用搜索上游：仅在 general 查询与 searxng 并发，支持 `raw`（Search API）与 `harness`（Messages + `deepseek_web_search`）两种模式，默认关闭。
+- 多上游融合按源内名次归一化（第 1 名 1.0）、URL 去重合并、`score × engine_boost` 排序；raw 官方分只用于源内排序与 `min_score`，harness 无原始分、不参与 `min_score`。
+- DeepSeek 上游失败静默降级并在结果末尾说明；启用但缺 key 或发生降级时不写缓存；searxng 与所有通用上游都失败才报错。
+- `asg engines` 支持 `gateway.upstream:deepseek` 的 `list` / `enable` / `disable` / `secret`；`route` 报 `ENGINE_NO_ROUTING`。
+- 新增配置 `search.deepseek`（默认 `enabled: false`、`mode: raw`）与密钥 `secrets.yaml → search.deepseek.api_key`（可用 `DEEPSEEK_API_KEY` 覆盖）。
+- 新增 ADR-0023：DeepSeek 通用搜索上游。
+
+### Changed
+
+- ADR-0006 的「searxng 单一上游」标注为部分由 ADR-0023 修订；外部搜索基础设施仍按原方式作为 searxng 引擎接入。
+
 ## [0.3.7] - 2026-11-15
 
 ### Added

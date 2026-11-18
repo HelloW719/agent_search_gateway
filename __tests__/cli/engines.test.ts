@@ -11,6 +11,7 @@ import {
   parseEngineRef,
   readLocalEngines,
   setEngines,
+  type EngineInfo,
 } from "../../src/cli/config/engines.js";
 import {
   run as enginesRun,
@@ -90,6 +91,14 @@ function appendBaiduToSettings(root: string, disabled: boolean): void {
   fs.appendFileSync(file, `  - name: baidu\n    disabled: ${disabled}\n`, "utf8");
 }
 
+/** 写入 DeepSeek 通用上游密钥；值可以是明文或 `env:NAME`。 */
+function writeDeepseekSecret(root: string, value: string): void {
+  write(
+    path.join(root, "secrets.yaml"),
+    ["search:", "  deepseek:", `    api_key: ${JSON.stringify(value)}`, ""].join("\n"),
+  );
+}
+
 /** 安装一个最小 search 扩展，用于 gateway.search 的 route / secret 测试。 */
 function writeSearchExtension(
   root: string,
@@ -166,16 +175,37 @@ function listenConfig(payload: unknown): Promise<string> {
   });
 }
 
+/** 密钥环境变量会让依赖检查与运行期行为受宿主机影响；测试期间清空并在结束后恢复。 */
+const SECRET_ENV_KEYS = [
+  "GATEWAY_TOKEN",
+  "EMBEDDING_API_KEY",
+  "SAUCENAO_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "BILIBILI_HTTP_TOKEN",
+  "BROWSER_PROXY_PASSWORD",
+] as const;
+const savedSecretEnv = new Map<string, string | undefined>();
+
 beforeEach(() => {
   restartCalls.length = 0;
   setRestartForTests(async (root) => {
     restartCalls.push(root);
   });
+  for (const key of SECRET_ENV_KEYS) {
+    savedSecretEnv.set(key, process.env[key]);
+    delete process.env[key];
+  }
 });
 
 afterEach(() => {
   setRestartForTests(null);
   setStdinReaderForTests(null);
+  for (const key of SECRET_ENV_KEYS) {
+    const value = savedSecretEnv.get(key);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  savedSecretEnv.clear();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -328,6 +358,10 @@ describe("parseEngineRef", () => {
     expect(parseEngineRef("gateway.search:weibo")).toEqual({
       group: "gateway.search",
       name: "weibo",
+    });
+    expect(parseEngineRef("gateway.upstream:deepseek")).toEqual({
+      group: "gateway.upstream",
+      name: "deepseek",
     });
     expect(parseEngineRef("searxng:google")).toEqual({ group: "searxng", name: "google" });
     expect(parseEngineRef("google")).toEqual({ name: "google" });
@@ -1047,5 +1081,149 @@ describe("engines secret", () => {
       after.data as { engines: Array<{ id: string; available: boolean }> }
     ).engines.find((engine) => engine.id === "gateway.search:demo")!;
     expect(afterEngine.available).toBe(true);
+  });
+});
+
+describe("gateway.upstream（DeepSeek 通用上游）", () => {
+  const DEEPSEEK_ID = "gateway.upstream:deepseek";
+
+  function deepseekRecord(root: string): EngineInfo {
+    return readLocalEngines(root).find((engine) => engine.id === DEEPSEEK_ID)!;
+  }
+
+  it("asg engines list 包含 deepseek，routing / requires 正确且默认关闭", async () => {
+    const root = makeRoot();
+    const listed = await enginesRun({ root, reporter, rest: ["list"] });
+    const engines = (listed.data as { engines: EngineInfo[] }).engines;
+    const record = engines.find((engine) => engine.id === DEEPSEEK_ID)!;
+
+    expect(record).toMatchObject({
+      group: "gateway.upstream",
+      name: "deepseek",
+      kind: "gateway",
+      enabled: false,
+      available: false,
+      routing: ["general"],
+    });
+    expect(record.requires).toEqual(["secrets.search.deepseek.api_key"]);
+    expect(record.source).toBeUndefined();
+  });
+
+  it("有密钥时 available=true，enabled 仍为 false（默认）", () => {
+    const root = makeRoot();
+    writeDeepseekSecret(root, "sk-test");
+
+    expect(deepseekRecord(root)).toMatchObject({ available: true, enabled: false });
+  });
+
+  it("env: 形式的密钥按解析后的值判断 available", () => {
+    const envKey = "ASG_TEST_DEEPSEEK_API_KEY";
+    const root = makeRoot();
+    writeDeepseekSecret(root, `env:${envKey}`);
+
+    delete process.env[envKey];
+    try {
+      expect(deepseekRecord(root).available).toBe(false);
+
+      process.env[envKey] = "sk-env";
+      expect(deepseekRecord(root).available).toBe(true);
+    } finally {
+      delete process.env[envKey];
+    }
+  });
+
+  it("enable / disable 写入 search.deepseek.enabled", async () => {
+    const root = makeRoot();
+    writeDeepseekSecret(root, "sk-test");
+
+    const enabled = await enginesRun({
+      root,
+      reporter,
+      rest: ["enable", DEEPSEEK_ID],
+    });
+    expect(enabled.data).toMatchObject({ changed: [DEEPSEEK_ID], restarted: true });
+
+    let config = parse(root, "gateway.yaml") as {
+      search: { deepseek?: { enabled?: boolean } };
+    };
+    expect(config.search.deepseek?.enabled).toBe(true);
+    expect(deepseekRecord(root).enabled).toBe(true);
+
+    await enginesRun({ root, reporter, rest: ["disable", DEEPSEEK_ID] });
+
+    config = parse(root, "gateway.yaml") as {
+      search: { deepseek?: { enabled?: boolean } };
+    };
+    expect(config.search.deepseek?.enabled).toBe(false);
+    expect(deepseekRecord(root).enabled).toBe(false);
+    expect(restartCalls).toHaveLength(2);
+  });
+
+  it("无密钥时 enable 报 MISSING_SECRET，且不写文件、不重启", async () => {
+    const root = makeRoot();
+    const configBefore = read(root, "gateway.yaml");
+
+    await expect(
+      enginesRun({ root, reporter, rest: ["enable", DEEPSEEK_ID] }),
+    ).rejects.toMatchObject({ code: "MISSING_SECRET", exitCode: 4 });
+
+    expect(read(root, "gateway.yaml")).toBe(configBefore);
+    expect(restartCalls).toHaveLength(0);
+  });
+
+  it("仅环境变量提供密钥时 enable 通过依赖检查", async () => {
+    const root = makeRoot();
+    process.env.DEEPSEEK_API_KEY = "sk-env-only";
+    try {
+      await enginesRun({ root, reporter, rest: ["enable", DEEPSEEK_ID] });
+      const config = parse(root, "gateway.yaml") as {
+        search: { deepseek?: { enabled?: boolean } };
+      };
+      expect(config.search.deepseek?.enabled).toBe(true);
+    } finally {
+      delete process.env.DEEPSEEK_API_KEY;
+    }
+  });
+
+  it("secret --stdin 写入 secrets.search.deepseek.api_key，随后 available=true", async () => {
+    const root = makeRoot();
+    setStdinReaderForTests(async () => "sk-stdin\n");
+
+    const result = await enginesRun({
+      root,
+      reporter,
+      rest: ["secret", DEEPSEEK_ID, "--stdin"],
+    });
+
+    const secrets = parse(root, "secrets.yaml") as {
+      search: { deepseek: { api_key: string } };
+    };
+    expect(secrets.search.deepseek.api_key).toBe("sk-stdin");
+    expect(result.data).toMatchObject({
+      secret: "secrets.search.deepseek.api_key",
+      changed: ["secrets.search.deepseek.api_key"],
+    });
+    expect(deepseekRecord(root).available).toBe(true);
+    expect(restartCalls).toEqual([root]);
+  });
+
+  it("route 报通用上游不支持类别路由", async () => {
+    const root = makeRoot();
+    const configBefore = read(root, "gateway.yaml");
+
+    await expect(
+      enginesRun({
+        root,
+        reporter,
+        rest: ["route", DEEPSEEK_ID, "--category", "foo"],
+      }),
+    ).rejects.toMatchObject({
+      code: "ENGINE_NO_ROUTING",
+      exitCode: 4,
+      message: expect.stringContaining("不支持类别路由"),
+    });
+
+    expect(read(root, "gateway.yaml")).toBe(configBefore);
+    expect(restartCalls).toHaveLength(0);
   });
 });

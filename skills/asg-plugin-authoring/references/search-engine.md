@@ -5,7 +5,7 @@
 ```ts
 export interface EngineProvider {
   id: string;                       // `${group}:${name}`
-  group: "searxng" | "gateway.reverse_image" | "gateway.search";
+  group: "searxng" | "gateway.reverse_image" | "gateway.search"; // 第三方插件可用组
   name: string;
   kind: "searxng" | "gateway";      // 第三方插件固定 "gateway"
   displayName: string;
@@ -38,6 +38,16 @@ export interface EngineProviderContext {
 `config_schema` 校验并补齐默认值；声明了 schema 时没有用户配置也会收到默认值对象。
 `pluginSecrets` 来自 `secrets.yaml → extensions.<manifest id>.<name>`，兼容旧的
 `extensions.<engineId>.<name>`（manifest id 优先）。
+
+## 通用上游：`gateway.upstream`（v1 仅内置）
+
+`gateway.upstream` 是网关直接调用、与 searxng 并发的通用搜索出口（当前内置
+`gateway.upstream:deepseek`，见 ADR-0023）。它只在 general 查询参与，不按类别路由，
+结果由网关按源内名次归一化后融合。
+
+**v1 不向第三方插件开放**：`extensions/loader.ts` 不把该组加入 allowlist，manifest 声明
+`provides: ["search"]` 也不会加载它。第三方插件只能使用 `gateway.search`（文本源）与
+`gateway.reverse_image`（图搜源）。
 
 ## 文本源：`gateway.search`
 

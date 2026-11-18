@@ -96,6 +96,27 @@ search:
     cache_ttl_ms: 60000
     retry: 1                 # 空结果重试次数（微博搜索页异步加载，首跑常为空）
 
+  # DeepSeek 通用搜索上游（ADR-0023）：默认关闭。
+  # 开启后仅在 general 查询与 searxng 并发；不新增 MCP 工具/参数。
+  # raw 调 /search（按成功请求计费，约 $0.75/1000 次，空结果不计费）；
+  # harness 调 /messages 的服务端 deepseek_web_search（搜索不额外计费，但耗模型 token、延迟更高）。
+  # api_key 写在 secrets.yaml 的 search.deepseek.api_key（或环境变量 DEEPSEEK_API_KEY）。
+  deepseek:
+    enabled: false
+    mode: raw                # raw | harness
+    limit: 10                # 单次最多返回条数（1-50）
+    api:                     # mode=raw
+      base_url: https://api.deepseek.com/v1/tools
+      need_content: false
+      localization: ""       # 非空时随请求发送
+      timeout_ms: 20000
+    harness:                 # mode=harness
+      base_url: https://api.deepseek.com/anthropic/v1
+      model: deepseek-flash
+      max_tokens: 4096
+      api_version: "2023-06-01"
+      timeout_ms: 60000
+
 rerank:
   enabled: true
   # 轻量重排层：绕过 searxng 的 category 分组排序，按「score × boost」降序重排，

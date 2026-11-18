@@ -6,12 +6,13 @@ import type { Logger } from "../logger.js";
 import { ErrorCodes, withCode } from "../utils/errors.js";
 import { Semaphore } from "../utils/semaphore.js";
 import { StringCache } from "./cache.js";
-import { cleanResults, resultEngines, type CleanedResult } from "./clean.js";
+import { cleanResults, resultEngines, type CleanResult, type CleanedResult } from "./clean.js";
 import type { EmbeddingProvider } from "./embedding/provider.js";
 import { mmrSelect, registeredDomainOfUrl } from "./embedding/diversity.js";
 import { mergeAndRank, type SemanticTimings } from "./embedding/semantic.js";
 import type { CorpusStore } from "./embedding/store.js";
 import type { EmbedResult } from "./embedding/types.js";
+import { mergeCleanedResults, rankNormalize, sortByWeightedScore } from "./fusion.js";
 import { loadLocalImage, publishImage, type LocalImage, type PublishResult } from "./image-publish.js";
 import { renderResults, renderSearchMarkdown } from "./render.js";
 import { rerankResults } from "./rerank.js";
@@ -30,7 +31,9 @@ import type {
   EngineProviderContext,
   GatewaySearchError,
   GatewaySearchPlan,
+  GatewaySearchResult,
   GatewaySearchRuntime,
+  GatewayUpstreamRuntime,
 } from "../engines/provider.js";
 
 export interface SearchParams {
@@ -232,6 +235,17 @@ export function isImageQuery(categories: string | undefined, extra: string[] = [
 
 /** 请求类别里是否出现指定类别名（大小写不敏感，按逗号分隔）。 */
 export { hasCategory } from "./category.js";
+
+/**
+ * 是否参与通用上游（ADR-0023）：显式 engines 不参与；类别为空或只含 `general` 才参与。
+ * 反向图搜 / 空 query 由调用方另行判断。
+ */
+function usesGeneralUpstream(params: SearchParams): boolean {
+  if (splitList(params.engines).length > 0) return false;
+  const cats = new Set(splitList(params.categories).map((c) => c.toLowerCase()));
+  return cats.size === 0 || (cats.size === 1 && cats.has("general"));
+}
+
 /**
  * 反向图搜触发判定（ADR-0010）：请求类别里出现配置的类别名（大小写不敏感）。
  * 「图就是 query」——类别只是开关，图片本身是以 URL 形式写在 query 里。
@@ -445,10 +459,18 @@ export interface SearchMetrics {
     published?: boolean;
     publishMs?: number;
   };
+  /** 通用上游（ADR-0023）：多上游分支逐源记录；未启用通用上游时为 undefined。 */
+  generalUpstreams?: Array<{
+    id: string;
+    ok: boolean;
+    results: number;
+    ms: number;
+    error?: string;
+  }>;
 }
 
-/** 构造稳定缓存键（搜索参数 + 选中引擎批次 + 语料命名空间一致）。 */
-function cacheKey(params: SearchParams, batches: string[], semanticTag = ""): string {
+/** 构造稳定缓存键（搜索参数 + 选中引擎批次 + 参与的通用上游 + 语料命名空间一致）。 */
+function cacheKey(params: SearchParams, batches: string[], semanticTag = "", upstreamTag = ""): string {
   return JSON.stringify([
     params.query,
     params.language ?? "",
@@ -460,6 +482,7 @@ function cacheKey(params: SearchParams, batches: string[], semanticTag = ""): st
     params.minScore ?? "",
     params.numResults ?? "",
     semanticTag,
+    upstreamTag,
   ]);
 }
 
@@ -612,6 +635,8 @@ export interface SearchSettingsDeps {
   rerank: RerankSettings;
   searxng: SearxngSettings;
   saucenao_api_key: string;
+  /** DeepSeek 通用上游密钥（secrets.search.deepseek.api_key）。 */
+  deepseek_api_key: string;
   weibo: WeiboSettings;
 }
 
@@ -621,10 +646,15 @@ export function createSearchService(
   logger: Logger,
   searchDeps: SearchDeps = {},
 ): SearchService {
-  const { search, rerank, searxng, saucenao_api_key, weibo } = deps;
+  const { search, rerank, searxng, saucenao_api_key, deepseek_api_key, weibo } = deps;
   const providerCtx: EngineProviderContext = {
     config: { search: search as unknown, weibo: weibo as unknown },
-    secrets: { search: { reverse_image: { saucenao: { api_key: saucenao_api_key } } } },
+    secrets: {
+      search: {
+        reverse_image: { saucenao: { api_key: saucenao_api_key } },
+        deepseek: { api_key: deepseek_api_key },
+      },
+    },
     logger,
   };
   const cache = new StringCache(search.cache_max_entries, search.cache_ttl_ms);
@@ -828,6 +858,17 @@ export function createSearchService(
       }
     }
 
+    // 通用上游（ADR-0023）：仅 general 查询、无显式 engines、query 非空、非反向图搜时参与。
+    // `enabled` 缺省视为 true；启用但 `available()` 为 false（缺 API key）→ 记下来，
+    // 末尾提示且本次结果不写缓存（结果不完整）。
+    const candidateUpstreams =
+      !reverseImage && effParams.query !== "" && usesGeneralUpstream(effParams)
+        ? providersForGroup("gateway.upstream").filter((p) => p.runtime?.kind === "upstream")
+        : [];
+    const enabledUpstreams = candidateUpstreams.filter((p) => p.enabled?.(providerCtx) ?? true);
+    const activeUpstreams = enabledUpstreams.filter((p) => p.available(providerCtx));
+    const unavailableUpstreams = enabledUpstreams.filter((p) => !p.available(providerCtx));
+
     const searxngConfig = await getSearxngConfig();
     const enabled = searxngConfig?.engines;
     // 显式 engines/categories 与 /config 不符 → 参数错误（取不到配置时保持旧行为）。
@@ -846,7 +887,12 @@ export function createSearchService(
     const limit = Math.min(requested, search.max_results_cap);
     // 本地图请求绕开搜索缓存：同一路径的文件内容随时会变，缓存会给出错的结果
     const cacheable = !effParams.imagePath;
-    const key = cacheKey(effParams, batches.map((b) => b.engines), corpus?.namespace ?? "");
+    // 参与的通用上游 id 进缓存键：开关/密钥变化后不会复用另一组上游的结果
+    const upstreamTag = activeUpstreams
+      .map((p) => p.id)
+      .sort()
+      .join(",");
+    const key = cacheKey(effParams, batches.map((b) => b.engines), corpus?.namespace ?? "", upstreamTag);
     const cached = cacheable ? cache.get(key) : undefined;
     if (cached !== undefined) {
       logger.debug(`search cache hit: "${params.query}"`);
@@ -885,6 +931,36 @@ export function createSearchService(
 
     const release = await sem.acquire();
     const preMs = performance.now() - tStart;
+    // 通用上游（ADR-0023）：与 searxng 并发启动（在信号量之后、批次之前），
+    // 每个 promise 用 catch 兜底成结构化失败，绝不抛裸异常。
+    const generalTasks = activeUpstreams.map((p) => {
+      const runtime = p.runtime as GatewayUpstreamRuntime;
+      const fail = (err: unknown): GatewaySearchResult => ({
+        ok: false,
+        error: { kind: "network", message: err instanceof Error ? err.message : String(err) },
+        latencyMs: 0,
+      });
+      let promise: Promise<GatewaySearchResult>;
+      try {
+        promise = runtime
+          .search(
+            effParams.query,
+            {
+              limit,
+              minScore: params.minScore,
+              language: effParams.language,
+              safeSearch: effParams.safeSearch,
+            },
+            providerCtx,
+          )
+          .catch(fail);
+      } catch (err) {
+        // provider 同步抛错（不是 rejected promise）也按失败处理
+        promise = Promise.resolve(fail(err));
+      }
+      promise.catch(() => undefined);
+      return { provider: p, promise };
+    });
     // 语义层：query 向量不依赖候选 → 先起 Promise，与上游 searxng 召回 overlap（省一次串行等待）。
     // provider/corpus 缺一即无语义层，无需发起；图片查询不走语义层（见 selectImageResults）；
     // catch 兜底避免未被消费时产生 unhandled rejection。
@@ -976,6 +1052,11 @@ export function createSearchService(
         }
       }
 
+      // 通用上游（ADR-0023）：searxng 批次结束后统一等待（此前与批次并发）
+      const generalResults = await Promise.all(
+        generalTasks.map(async (t) => ({ ...t, result: await t.promise })),
+      );
+
       // 反向图搜：等所有附加源（与上面的 searxng 批次并发），逐源汇总提示
       const sourceResults = await Promise.all(
         sourceTasks.map(async (t) => ({ name: t.name, result: await t.promise })),
@@ -1021,11 +1102,73 @@ export function createSearchService(
         }
       }
 
-      if (!lastData && reverseCount === 0) {
+      // 已启用但不可用的源：先记提示，错误路径也能看到。
+      for (const p of unavailableUpstreams) {
+        logger.warn(`通用上游 ${p.id} 已启用但不可用（未配置 API key），已跳过`);
+        notes.push(`${p.displayName} 上游已启用但不可用（未配置 API key）；已跳过。`);
+      }
+
+      const data: SearxngResponse = lastData ?? { query: upstreamQuery ?? effParams.query, results: [] };
+      const tLocal = performance.now();
+      const filter = resolveDomainFilter();
+      const shouldBlock = filter.enabled
+        ? (host: string) => isBlocked(host, filter.blocked, filter.allowlist)
+        : undefined;
+
+      // 通用上游结果先按源内规则清洗（provider 已处理 minScore），
+      // 用它判断是否真正贡献候选：全部被过滤时回落单上游路径，保持 searxng 行为不变。
+      const cleanedUpstreams: Array<{
+        provider: EngineProvider;
+        clean: CleanResult;
+        latencyMs: number;
+      }> = [];
+      for (const { provider: p, result } of generalResults) {
+        if (!result.ok) continue;
+        cleanedUpstreams.push({
+          provider: p,
+          clean: cleanResults(result.results, {
+            maxResultChars: search.max_result_chars,
+            minScore: undefined,
+            shouldBlock,
+          }),
+          latencyMs: result.latencyMs,
+        });
+      }
+      const upstreamProvided = cleanedUpstreams.some((x) => x.clean.results.length > 0);
+
+      if (!lastData && reverseCount === 0 && !upstreamProvided) {
         // 上游失败：报错但尽量附语料召回结果
         const e = lastError ?? { kind: "network" as const, message: "no engine available" };
-        const code = errorCodeForKind(e.kind);
-        const errText = `搜索失败（${e.kind}${e.status ? ` ${e.status}` : ""}）：${e.message}\n\n请稍后重试，或更换关键词。`;
+        // 通用上游失败（ADR-0023）：auth 优先映射为 SEARCH_AUTH_REQUIRED
+        const failedGeneral: Array<{ displayName: string; error: GatewaySearchError }> = [];
+        for (const { provider: p, result } of generalResults) {
+          if (!result.ok) failedGeneral.push({ displayName: p.displayName, error: result.error });
+        }
+        const searxKind: string | undefined = lastError?.kind;
+        const anyAuth = searxKind === "auth" || failedGeneral.some((f) => f.error.kind === "auth");
+        const code = anyAuth
+          ? ErrorCodes.SEARCH_AUTH_REQUIRED
+          : errorCodeForKind(lastError?.kind ?? failedGeneral[0]?.error.kind ?? e.kind);
+        let errText = `搜索失败（${e.kind}${e.status ? ` ${e.status}` : ""}）：${e.message}\n\n请稍后重试，或更换关键词。`;
+        if (generalTasks.length > 0) {
+          // 多上游：错误文本同时点明 searxng 与各通用上游的原因
+          const reasons: string[] = [];
+          if (lastError) {
+            reasons.push(
+              `searxng（${lastError.kind}${lastError.status ? ` ${lastError.status}` : ""}）：${lastError.message}`,
+            );
+          } else {
+            reasons.push("searxng：无可用引擎");
+          }
+          for (const { provider: p, result } of generalResults) {
+            reasons.push(
+              result.ok
+                ? `${p.displayName}：无结果`
+                : `${p.displayName}（${result.error.kind}）：${result.error.message}`,
+            );
+          }
+          errText = `搜索失败：${reasons.join("；")}\n\n请稍后重试，或更换关键词。`;
+        }
         const noteText = notes.length > 0 ? `\n\n${notes.map((n) => `> ${n}`).join("\n>\n")}` : "";
 
         let recalled: CleanedResult[] = [];
@@ -1048,35 +1191,79 @@ export function createSearchService(
         return { ok: false, code, text: withCode(code, `${errText}${noteText}`) };
       }
 
-      // searxng 失败但网关侧图源有结果 → 降级为部分成功（不报错）
-      const data: SearxngResponse = lastData ?? { query: upstreamQuery ?? effParams.query, results: [] };
-      if (!lastData && upstreamBatches > 0) notes.push("searxng 未返回结果，以下仅来自网关侧图源。");
-      // 多源候选合并：按 URL 去重、引擎归属取并集（ADR-0010/0012）
-      let candidates = data.results;
-      for (const { result } of sourceResults) {
-        if (result.ok && result.results.length > 0) candidates = unionResults(candidates, result.results);
+      // 通用上游（ADR-0023）：失败静默降级，逐条提示；已启用但缺 key 的源同样提示
+      for (const { provider: p, result } of generalResults) {
+        if (result.ok) continue;
+        const hint = result.error.kind === "auth" && p.authHint ? ` 处理：${p.authHint}` : "";
+        notes.push(
+          `${p.displayName} 上游不可用（${result.error.kind}）——${result.error.message}；以下结果不含 ${p.displayName}。${hint}`,
+        );
       }
-      const rawCount = candidates.length;
-      const engineCounts: Record<string, number> = {};
-      for (const r of candidates) {
-        for (const e of resultEngines(r)) engineCounts[e] = (engineCounts[e] ?? 0) + 1;
+      // searxng 失败但网关侧图源/通用上游有结果 → 降级为部分成功（不报错）
+      if (!lastData && upstreamBatches > 0) {
+        notes.push(
+          upstreamProvided
+            ? "searxng 未返回结果，以下结果来自通用上游。"
+            : "searxng 未返回结果，以下仅来自网关侧图源。",
+        );
       }
 
-      // 轻量重排：绕过 searxng category 分组排序，按 score × boost 降序（语义不可用时的回退顺序）
-      const tLocal = performance.now();
-      const reranked = rerankResults(candidates, {
-        enabled: rerank.enabled,
-        engineBoost: rerank.engine_boost,
-      });
+      let rawCount: number;
+      let engineCounts: Record<string, number>;
+      let cleaned: CleanedResult[];
+      let blockedCount: number;
 
-      const filter = resolveDomainFilter();
-      const { results: cleaned, blockedCount } = cleanResults(reranked, {
-        maxResultChars: search.max_result_chars,
-        minScore: params.minScore,
-        shouldBlock: filter.enabled
-          ? (host) => isBlocked(host, filter.blocked, filter.allowlist)
-          : undefined,
-      });
+      if (upstreamProvided) {
+        // 多上游（ADR-0023）：各源原始分不可比 → 源内名次归一化后合并，再按 score × engine_boost 排序。
+        // 这里不再调用 rerankResults，避免二次 boost。
+        const searxngOrdered = rerank.enabled ? sortByWeightedScore(data.results, {}) : data.results;
+        const searxngClean = cleanResults(searxngOrdered, {
+          maxResultChars: search.max_result_chars,
+          minScore: params.minScore,
+          shouldBlock,
+        });
+        const sourceLists: CleanedResult[][] = [rankNormalize(searxngClean.results)];
+        blockedCount = searxngClean.blockedCount;
+
+        for (const { clean } of cleanedUpstreams) {
+          // provider 已按源内 minScore 过滤（harness 无原始分时不过滤），这里不再做全局 minScore
+          blockedCount += clean.blockedCount;
+          sourceLists.push(rankNormalize(clean.results));
+        }
+
+        const merged = mergeCleanedResults(sourceLists);
+        cleaned = sortByWeightedScore(merged, rerank.engine_boost);
+        rawCount = merged.length;
+        engineCounts = {};
+        for (const r of merged) {
+          for (const e of resultEngines(r)) engineCounts[e] = (engineCounts[e] ?? 0) + 1;
+        }
+        // 并发启动：整体耗时取 searxng 与各通用上游的最大值
+        latencyMs = Math.max(latencyMs, ...cleanedUpstreams.map((x) => x.latencyMs));
+      } else {
+        // 多源候选合并：按 URL 去重、引擎归属取并集（ADR-0010/0012）
+        let candidates = data.results;
+        for (const { result } of sourceResults) {
+          if (result.ok && result.results.length > 0) candidates = unionResults(candidates, result.results);
+        }
+        rawCount = candidates.length;
+        engineCounts = {};
+        for (const r of candidates) {
+          for (const e of resultEngines(r)) engineCounts[e] = (engineCounts[e] ?? 0) + 1;
+        }
+
+        const reranked = rerankResults(candidates, {
+          enabled: rerank.enabled,
+          engineBoost: rerank.engine_boost,
+        });
+        const cleanOut = cleanResults(reranked, {
+          maxResultChars: search.max_result_chars,
+          minScore: params.minScore,
+          shouldBlock,
+        });
+        cleaned = cleanOut.results;
+        blockedCount = cleanOut.blockedCount;
+      }
       const localMs = performance.now() - tLocal;
 
       // 合并语料召回 + 纯语义排序；失败则回退引擎分顺序。
@@ -1117,7 +1304,7 @@ export function createSearchService(
         cappedAt: requested > limit ? limit : undefined,
         availableCount: candidateCount,
       });
-      // 反向图搜的降级/无匹配提示（只在该路径下出现，正常搜索逐字不变）
+      // 反向图搜 / 通用上游的降级与无匹配提示（只在这些路径下出现，正常搜索逐字不变）
       let text = notes.length > 0 ? `${rendered}\n\n${notes.map((n) => `> ${n}`).join("\n>\n")}` : rendered;
       // 显式过滤且最终 0 条：补一句说明，避免被误读成「确实没有匹配」
       const filterNote = ranked.length === 0 ? zeroResultFilterNote(effParams) : undefined;
@@ -1157,9 +1344,25 @@ export function createSearchService(
                 publishMs: localImage && search.reverse_image.publish.enabled ? publishMs : undefined,
               }
             : undefined,
+        generalUpstreams:
+          generalTasks.length > 0
+            ? generalResults.map(({ provider: p, result }) => ({
+                id: p.id,
+                ok: result.ok,
+                results: result.ok ? result.results.length : 0,
+                ms: result.latencyMs,
+                error: result.ok ? undefined : result.error.kind,
+              }))
+            : undefined,
       });
 
-      if (cacheable) cache.set(key, text);
+      // 通用上游降级（缺 key / 调用失败 / searxng 失败）时结果不完整，不写缓存。
+      // 反向图搜等无通用上游的路径保持原有缓存行为。
+      const upstreamDegraded =
+        unavailableUpstreams.length > 0 ||
+        generalResults.some((r) => !r.result.ok) ||
+        (generalTasks.length > 0 && lastData === undefined);
+      if (cacheable && !upstreamDegraded) cache.set(key, text);
       logger.debug(`search done: "${displayQuery}" (${ranked.length}/${rawCount} results, ${blockedCount} blocked)`);
       return { ok: true, text, cacheHit: false };
     } finally {

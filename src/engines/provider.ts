@@ -46,6 +46,28 @@ export interface ReverseImageRuntime {
   search(input: ImageInput, ctx: EngineProviderContext): Promise<SourceCall>;
 }
 
+export interface GatewayUpstreamOptions {
+  limit: number;
+  minScore?: number;
+  language?: string;
+  safeSearch?: string;
+}
+
+/**
+ * 通用上游：与 searxng 并发的「通用搜索」源。
+ *
+ * `minScore` 由 provider 在源内处理：raw 按官方分过滤，harness 无原始分时忽略；
+ * 服务层不对上游结果做全局 minScore 过滤。
+ */
+export interface GatewayUpstreamRuntime {
+  kind: "upstream";
+  search(
+    query: string,
+    options: GatewayUpstreamOptions,
+    ctx: EngineProviderContext,
+  ): Promise<GatewaySearchResult>;
+}
+
 export interface GatewaySearchRuntime {
   kind: "search";
   /** 类别命中时返回计划；不命中返回 undefined。 */
@@ -57,7 +79,7 @@ export interface GatewaySearchRuntime {
   ): Promise<GatewaySearchResult>;
 }
 
-export type EngineRuntime = ReverseImageRuntime | GatewaySearchRuntime;
+export type EngineRuntime = ReverseImageRuntime | GatewaySearchRuntime | GatewayUpstreamRuntime;
 
 export interface EngineProvider {
   /** `${group}:${name}` */
@@ -74,7 +96,7 @@ export interface EngineProvider {
   available(ctx: EngineProviderContext): boolean;
   /** 引擎自身的启用状态；缺省视为 true（如以图搜图源由 sources 数组决定）。 */
   enabled?(ctx: EngineProviderContext): boolean;
-  /** gateway.search 源的启用布尔值在 gateway.yaml 中的路径；由 GatewayStore 写回。 */
+  /** gateway.search / gateway.upstream 源的启用布尔值在 gateway.yaml 中的路径；由 GatewayStore 写回。 */
   enabledPath?: readonly string[];
   runtime?: EngineRuntime;
   /** auth 错误时追加的提示，如微博需要登录。 */

@@ -11,7 +11,7 @@ Agent（hermes / OpenCode / my-agent-core / 其它 MCP client）
   │  MCP over HTTP
   ▼
 gateway (本服务, :3000/mcp)
-  ├─ search → searxng (:8888) → 清洗/广告过滤/缓存 → 纯 md
+  ├─ search → searxng (:8888) [+ DeepSeek 通用上游，可选] → 融合/清洗/广告过滤/缓存 → 纯 md
   ├─ fetch  → 按 Content-Type 分派：
   │     网页 HTML→md；文本类直出/轻转换（JSON/CSV/XML）
   │     PDF → 抽正文（unpdf）
@@ -232,6 +232,79 @@ opencli weibo whoami -f json
 
 > `weibo post` 是浏览器操作，单次可能 5–10s。若 Chrome 未连接，OpenCLI 默认会等 45s；把 `OPENCLI_BROWSER_CONNECT_TIMEOUT` 调小（如 20）或把 `weibo.cli.timeout_ms` 设为 45s 以上，才能得到 `WEIBO_BRIDGE_DOWN` 而不是 `WEIBO_TIMEOUT`。
 
+## DeepSeek 通用搜索上游（可选）
+
+默认关闭。开启后，只在**普通关键词搜索**中与 searxng 并发，结果合并后走同一套清洗、重排、语义层；**不新增 MCP 工具或参数**，调用方无感知（ADR-0023）。
+
+启用：
+
+```bash
+asg engines list
+asg engines secret gateway.upstream:deepseek --stdin   # 先写密钥（secrets.yaml）
+asg engines enable gateway.upstream:deepseek
+```
+
+也可以直接编辑配置：
+
+```yaml
+search:
+  deepseek:
+    enabled: true
+    mode: raw          # raw | harness
+    limit: 10          # 1-50
+    api:               # mode=raw
+      base_url: https://api.deepseek.com/v1/tools
+      need_content: false
+      localization: ""
+      timeout_ms: 20000
+    harness:           # mode=harness
+      base_url: https://api.deepseek.com/anthropic/v1
+      model: deepseek-flash
+      max_tokens: 4096
+      api_version: "2023-06-01"
+      timeout_ms: 60000
+```
+
+密钥：`secrets.yaml → search.deepseek.api_key`，或环境变量 `DEEPSEEK_API_KEY`。
+
+### 两种模式
+
+| 模式 | 端点 | 请求形态 | 计费 | 延迟 |
+|---|---|---|---|---|
+| `raw`（默认） | `POST {base_url}/search` | 直接搜索，body `{ query, count, need_content }`，返回带 `rerank_score` 的结果 | 按成功请求计费，约 $0.75 / 1000 次；空结果不计费 | 低（单次搜索请求） |
+| `harness` | `POST {base_url}/messages` | Anthropic Messages 形状 + 服务端 `deepseek_web_search` 工具，模型决定是否搜索 | 搜索本身不额外计费，但每次消耗模型 token | 高（多一次模型推理） |
+
+- `raw` 适合低延迟、可预期的通用补充；官方 `rerank_score` 只在 DeepSeek 源内排序和 `min_score` 过滤时使用。
+- `harness` 适合希望模型先筛选再返回链接的场景；结果没有原始分，因此不参与 `min_score`。没有触发服务端搜索（没有 `web_search_tool_result`）会按上游错误降级。
+
+### 参与条件
+
+以下全部满足时才调用 DeepSeek：
+
+- `search.deepseek.enabled: true`，且 API key 非空；
+- 不是反向图搜；
+- `query` 非空；
+- `categories` 为空，或只包含 `general`；
+- 没有显式 `engines`。
+
+所以 `categories=images` / `search_by_image` / `weibo` / `science` 等显式类别不会调用它，传了 `engines` 也不会。它不做 DeepSeek 图片搜索，也不接 DeepSeek Fetch API。
+
+### 评分与融合
+
+- 每个源先做**源内名次归一化**：第 1 名 `1.0`，最后一名 `1/n`；
+- 跨源按 URL 去重，重复项合并 `engines`、补齐空字段、`score` 取较大值；
+- 最终排序为 `score × engine_boost`；`engine_boost` 是唯一跨源权重，可把 `deepseek` / `deepseek_harness` 调高或调低；
+- raw 官方分只用于源内排序与 `min_score`；harness 无原始分，不参与 `min_score`；
+- 多上游时不重复调用 `rerankResults`，之后照常进入语义层。
+
+### 失败与缓存
+
+- DeepSeek 失败/超时/鉴权失败：**静默降级**，仍返回 searxng 结果，并在末尾说明「以下结果不含 DeepSeek」；鉴权失败会附带配置提示。
+- 启用了但没配 key：跳过并在末尾说明。
+- searxng 失败但 DeepSeek 有结果：返回 DeepSeek 结果并说明来源。
+- 两边都失败才报错；任一方鉴权失败优先返回 `SEARCH_AUTH_REQUIRED`。
+- 发生降级时不写搜索缓存，避免把临时故障固化。
+
 ## 一键安装（推荐）
 
 > **0.3.4 起不再支持 Docker 部署，请使用原生安装。**
@@ -355,7 +428,7 @@ npm test               # vitest
 
 - `gateway.yaml`：非敏感设置。完整示例见 `gateway.yaml.example`，**不接受任何密钥字段**。
 - `secrets.yaml`：只放密钥。模板见 `secrets.yaml.example`，建议 `chmod 600`。
-- 环境变量（`GATEWAY_TOKEN` / `EMBEDDING_API_KEY` / `SAUCENAO_API_KEY` / `BILIBILI_HTTP_TOKEN` / `BROWSER_PROXY_PASSWORD`）优先级最高。
+- 环境变量（`GATEWAY_TOKEN` / `EMBEDDING_API_KEY` / `SAUCENAO_API_KEY` / `DEEPSEEK_API_KEY` / `BILIBILI_HTTP_TOKEN` / `BROWSER_PROXY_PASSWORD`）优先级最高。
 
 内部实现上，每个组件只接收自己那段设置（如 `search` / `fetch` / `browser`）和需要的密钥，不再拿全量配置。配置在启动时加载一次，修改后需重启。
 
@@ -366,7 +439,7 @@ gateway:        # host/port（token 在 secrets.yaml）
 logging:        # level/file
 searxng:        # url/timeout_ms
 flaresolverr:   # url/enabled/timeout_ms/max_concurrent/trigger_status/fallback_on_empty
-search:         # max_results/max_results_cap/max_result_chars/cache_ttl_ms/cache_max_entries/max_concurrent
+search:         # max_results/max_results_cap/max_result_chars/cache_ttl_ms/cache_max_entries/max_concurrent/deepseek（通用上游，默认关闭）
 fetch:          # timeout_ms/max_bytes/user_agent/block_private_ips/structural/max_output_chars/cache_ttl_ms/cache_max_entries/max_download_bytes/download_dir/download_ttl_ms/download_max_total_bytes/files_route
 ad_filter:      # enabled/level(off|ads|ads+tracking|full)/extra_domains/hosts_file/allowlist
 browser:        # enabled/headless/pool_size/idle_ttl_ms/engine(chromium|camoufox预留)/proxy_*/wait_for_selector/screenshot
@@ -489,7 +562,8 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 - `settings.yml` 由一键安装器从 `searxng-ext/settings.template.yml` 渲染；手改后重装会被覆盖，改模板或改生成后的文件并重启
 - 引擎开关用 `asg engines enable/disable <name|group:name>`；searxng 引擎写 settings.yml，网关源写 gateway.yaml，然后整栈重启（会断开 MCP 连接）
 - 引擎路由用 `asg engines route`：searxng 引擎设 `resident` / `rotating` / `none`，文本源设 `--category` / `--hot-category`；密钥用 `asg engines secret <engine> --stdin`（值只从 stdin 读）
-- 裸名冲突时用限定名区分：`searxng:baidu` / `gateway.reverse_image:baidu`；微博搜索用 `gateway.search:weibo`（需安装官方 weibo 扩展，并开启顶层 `weibo.enabled: true`）
+- 通用上游 `gateway.upstream:deepseek` 只支持 `list` / `enable` / `disable` / `secret`，**不支持 `route`**；启用后写 `search.deepseek.enabled`
+- 裸名冲突时用限定名区分：`searxng:baidu` / `gateway.reverse_image:baidu`；微博搜索用 `gateway.search:weibo`（需安装官方 weibo 扩展，并开启顶层 `weibo.enabled: true`）；DeepSeek 用 `gateway.upstream:deepseek`
 
 ### 广告过滤（StevenBlack hosts）
 

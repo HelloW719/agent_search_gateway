@@ -261,6 +261,7 @@ asg fetch <url> [--max-chars <n>] [--render auto|always|never] [--timeout <秒>]
 | 端口、searxng URL、FlareSolverr 开关、浏览器开关 | `gateway.yaml` |
 | 搜索引擎启用/禁用 | `data/deps/searxng/settings.yml` |
 | 引擎路由策略（resident / rotating） | `gateway.yaml` |
+| 通用上游启用/禁用 | `gateway.yaml` → `search.deepseek.enabled` |
 | 扩展引擎路由覆盖 | `gateway.yaml` → `extensions.<engineId>.routing` |
 | 扩展插件私有配置 | `gateway.yaml` → `extensions.<manifest id>.config` |
 | 扩展引擎密钥 | `secrets.yaml` → `extensions.<engineId>.<name>` |
@@ -341,12 +342,14 @@ asg engines secret <engine> [--name <name>] --clear
 | `searxng` | `searxng` | `data/deps/searxng/settings.yml` → `engines[].disabled` |
 | `gateway.reverse_image` | `gateway` | `gateway.yaml` → `search.reverse_image.sources` |
 | `gateway.search` | `gateway` | `gateway.yaml` → `search.<engine>.enabled` / `extensions.<engineId>.routing` |
+| `gateway.upstream` | `gateway` | `gateway.yaml` → `search.deepseek.enabled` |
 
-第一版网关原生以图搜图源固定为 `tracemoe`、`saucenao`、`baidu`；文本源为 `weibo`。
+第一版网关原生以图搜图源固定为 `tracemoe`、`saucenao`、`baidu`；文本源为 `weibo`；
+通用上游为 `deepseek`。
 
 - 每条记录的 `id` 固定为 `${group}:${name}`，`group` 表示它归哪个存储适配器管理；
 - `list` 只读本地文件，离线可用；`list --all` 叠加 searxng `/config` 全量列表，searxng 不在线时报 `BACKEND_DOWN`（退出码 1）；
-- `enable/disable` 支持限定名 `searxng:google`、`gateway.reverse_image:baidu`、`gateway.search:weibo`；裸名（如 `google`）只在唯一命中时生效，命中多个 group 时报 `ENGINE_AMBIGUOUS`（退出码 4，`details.engines` 给出候选 id）；
+- `enable/disable` 支持限定名 `searxng:google`、`gateway.reverse_image:baidu`、`gateway.search:weibo`、`gateway.upstream:deepseek`；裸名（如 `google`）只在唯一命中时生效，命中多个 group 时报 `ENGINE_AMBIGUOUS`（退出码 4，`details.engines` 给出候选 id）；
 - `enable/disable` 时本地不存在、但属于 searxng 默认引擎的名字，在线时通过 `/config` 校验后追加最小覆盖项；searxng 不在线则按 `ENGINE_NOT_FOUND` 处理；
 - `gateway.*` 组不做远端兜底：本地没有就是 `ENGINE_NOT_FOUND`；
 - `route` / `secret` 一次只接受一个引擎，同样支持 `group:name` 与唯一裸名；
@@ -354,6 +357,7 @@ asg engines secret <engine> [--name <name>] --clear
   - `searxng`：只接受位置参数 `resident` / `rotating` / `none`，写 `gateway.yaml` 的 `search.engines.resident` / `search.engines.rotating`（两个列表互斥）；
   - `gateway.search`：只接受 `--category` / `--hot-category` / `--clear`，写 `extensions.<engineId>.routing.category` / `.hot_category`；`--clear` 删除 `routing`，回退插件默认；
   - `gateway.reverse_image`：不支持路由，报 `ENGINE_NO_ROUTING`（退出码 4），用 `enable` / `disable` 控制 `search.reverse_image.sources`；
+  - `gateway.upstream`：不支持路由，报 `ENGINE_NO_ROUTING`（退出码 4），用 `enable` / `disable` 控制 `search.deepseek.enabled`；
 - `secret` 从引擎 `requires` 推导密钥路径：
   - `secrets.a.b` → 内置密钥，写 `secrets.yaml` 的 `a.b`；
   - `secret:<name>` → 扩展密钥，写 `secrets.yaml` 的 `extensions.<engineId>.<name>`；
@@ -396,6 +400,25 @@ asg engines secret <engine> [--name <name>] --clear
   "requires": ["config:weibo.enabled"]
 }
 ```
+
+通用上游记录的 `routing` 只有 `general`：
+
+```json
+{
+  "id": "gateway.upstream:deepseek",
+  "group": "gateway.upstream",
+  "name": "deepseek",
+  "kind": "gateway",
+  "enabled": false,
+  "available": false,
+  "routing": ["general"],
+  "requires": ["secrets.search.deepseek.api_key"]
+}
+```
+
+`asg engines secret gateway.upstream:deepseek --stdin` 会写
+`secrets.yaml → search.deepseek.api_key`；也可以用环境变量 `DEEPSEEK_API_KEY` 覆盖。
+`gateway.upstream` 组只支持 `list` / `enable` / `disable` / `secret`，不支持 `route`。
 
 `extensions` 段按完整 engineId 保存用户覆盖，例如：
 

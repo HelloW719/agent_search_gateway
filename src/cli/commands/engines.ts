@@ -420,6 +420,15 @@ async function runRoute(
     };
   }
 
+  if (record.group === "gateway.upstream") {
+    throw new CliError(
+      "ENGINE_NO_ROUTING",
+      EXIT.INVALID,
+      `${record.id} 不支持类别路由；请使用 asg engines enable/disable 控制`,
+      { engine: record.id },
+    );
+  }
+
   if (record.group === "gateway.search") {
     if (rest.length > 0) usage("gateway.search 路由只接受 --category / --hot-category / --clear");
     if (clear && (category !== undefined || hotCategory !== undefined)) {

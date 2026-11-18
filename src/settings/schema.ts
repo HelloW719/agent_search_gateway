@@ -104,6 +104,41 @@ const searchWeiboSchema = z
   })
   .strict();
 
+const searchDeepseekApiSchema = z
+  .object({
+    base_url: z.string().url().default("https://api.deepseek.com/v1/tools"),
+    need_content: z.boolean().default(false),
+    localization: z.string().default(""),
+    timeout_ms: z.number().int().positive().default(20000),
+  })
+  .strict();
+
+const searchDeepseekHarnessSchema = z
+  .object({
+    base_url: z.string().url().default("https://api.deepseek.com/anthropic/v1"),
+    model: z.string().min(1).default("deepseek-flash"),
+    max_tokens: z.number().int().positive().default(4096),
+    api_version: z.string().min(1).default("2023-06-01"),
+    timeout_ms: z.number().int().positive().default(60000),
+  })
+  .strict();
+
+/**
+ * DeepSeek 通用上游（默认关闭）。
+ *
+ * - raw：调用 Search API，官方分只用于源内排序 / min_score；
+ * - harness：Messages + `deepseek_web_search`，无原始分。
+ */
+const searchDeepseekSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    mode: z.enum(["raw", "harness"]).default("raw"),
+    limit: z.number().int().positive().max(50).default(10),
+    api: searchDeepseekApiSchema.default(() => searchDeepseekApiSchema.parse({})),
+    harness: searchDeepseekHarnessSchema.default(() => searchDeepseekHarnessSchema.parse({})),
+  })
+  .strict();
+
 export const searchSchema = z
   .object({
     max_results: z.number().int().positive().max(50).default(10),
@@ -124,6 +159,7 @@ export const searchSchema = z
     reverse_image: reverseImageSchema.default(() => reverseImageSchema.parse({})),
     // 微博搜索/热搜（网关侧文本源）：categories 命中才启用；命中时不请求 searxng。
     weibo: searchWeiboSchema.default(() => searchWeiboSchema.parse({})),
+    deepseek: searchDeepseekSchema.default(() => searchDeepseekSchema.parse({})),
   })
   .strict();
 

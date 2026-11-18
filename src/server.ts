@@ -369,6 +369,7 @@ export async function createServer(settings: Settings, secrets: Secrets, logger:
       rerank: settings.rerank,
       searxng: settings.searxng,
       saucenao_api_key: secrets.search.reverse_image.saucenao.api_key,
+      deepseek_api_key: secrets.search.deepseek.api_key,
       weibo: settings.weibo,
     },
     () => getDomainFilter(settings.ad_filter, logger),

@@ -7,10 +7,11 @@
 | 类别 | 归属 | 谁执行 | 启用状态存哪里 |
 |---|---|---|---|
 | searxng 引擎 | `EngineGroup = "searxng"` | searxng 进程 | `data/deps/searxng/settings.yml` 的 `engines[].disabled` |
-| 网关原生引擎 | `gateway.reverse_image` / `gateway.search` | gateway（Node） | `gateway.yaml`：`search.reverse_image.sources` / `search.weibo.enabled` |
+| 网关原生引擎 | `gateway.reverse_image` / `gateway.search` / `gateway.upstream` | gateway（Node） | `gateway.yaml`：`search.reverse_image.sources` / `search.weibo.enabled` / `search.deepseek.enabled` |
 
 - **searxng 引擎**由 searxng 自己执行；网关只负责改 settings.yml，然后把引擎名转发给 searxng。
 - **网关原生引擎**由 gateway 自己执行。provider 同时提供 CLI 需要的元数据（名称、可用性、routing、requires）和运行期需要的调用实现。
+- **通用上游**（`gateway.upstream`）是网关原生引擎中的特殊一类：不按类别路由，只在 general 查询与 searxng 并发，产出候选后交给跨源融合（ADR-0023）。
 
 CLI 与运行期共享 `src/engines/types.ts` 里的 `EngineKind` / `EngineGroup` / `EngineRecord`；`src/cli/engines/types.ts` 只是重新导出这些公共类型，并保留 CLI 专属的 `EngineStore` 契约。
 
@@ -29,7 +30,7 @@ interface EngineProvider {
   requires?: string[];     // secrets.… / secret:<name> / config:…
   available(ctx): boolean; // 前置条件（密钥 / 上游能力开关）
   enabled?(ctx): boolean;  // 引擎自身的启用状态
-  enabledPath?: string[];  // gateway.search 写回 gateway.yaml 的布尔路径
+  enabledPath?: string[];  // gateway.search / gateway.upstream 写回 gateway.yaml 的布尔路径
   runtime?: EngineRuntime;
   authHint?: string;
 }
@@ -48,7 +49,7 @@ interface EngineProvider {
 ```
 
 - CLI 传原始 `configPlain`（整份 gateway.yaml）与 secrets。
-- 运行期传 `{ search, weibo }` 与 `{ search: { reverse_image: { saucenao: { api_key } } } }`。
+- 运行期传 `{ search, weibo }` 与 `{ search: { reverse_image: { saucenao: { api_key } }, deepseek: { api_key } } }`。
 - provider 内部一律用 `asObject` / `dig` 读取，不依赖完整 schema 类型，因此两种调用方可以共用。
 - 第三方 search 插件读取 `ctx.pluginConfig`：来源是 `gateway.yaml` 的
   `extensions.<manifest id>.config`，已按 manifest 的 `config_schema` 校验并补齐默认值，递归冻结。
@@ -68,10 +69,11 @@ interface EngineProvider {
   `extensions.<engineId>.<name>`；两者任一非空即满足。
 - `config:a.b`：配置依赖，读 `gateway.yaml`。
 
-运行期分两种：
+运行期分三种：
 
 - `ReverseImageRuntime`：`kind: "reverse_image"`，`search(input, ctx)` 返回统一的 `SourceCall`。
 - `GatewaySearchRuntime`：`kind: "search"`，`plan(categories, ctx)` 判断类别是否命中，`search(query, options, ctx)` 返回 `GatewaySearchResult`。
+- `GatewayUpstreamRuntime`：`kind: "upstream"`，`search(query, options, ctx)` 返回 `GatewaySearchResult`；没有 `plan()`，参与条件由运行期统一判断（见 3.2）。
 
 ## 3. 新增一个网关原生引擎
 
@@ -136,6 +138,66 @@ enabled: (ctx) => ctx.pluginConfig?.enabled !== false,
 `--clear` 会删除 `extensions.<engineId>.routing`，插件恢复自己的默认 `routing()` 与 `plan()`。
 没有路由 / 配置 / 密钥的插件不会被包装，行为与插件自身实现完全一致。
 
+### 3.2 通用上游（`gateway.upstream`）
+
+通用上游与文本源的区别：**不按类别路由、不经过 searxng、与 searxng 并发**，只在
+general 查询参与。当前内置 `gateway.upstream:deepseek`（ADR-0023）。
+
+```ts
+interface GatewayUpstreamOptions {
+  limit: number;
+  minScore?: number;
+  language?: string;
+  safeSearch?: string;
+}
+
+interface GatewayUpstreamRuntime {
+  kind: "upstream";
+  search(
+    query: string,
+    options: GatewayUpstreamOptions,
+    ctx: EngineProviderContext,
+  ): Promise<GatewaySearchResult>;
+}
+```
+
+参与条件（全部满足才调用）：
+
+1. `enabled(ctx) === true`；
+2. `available(ctx) === true`（密钥解析后非空）；
+3. 不是反向图搜；
+4. `query.trim() !== ""`；
+5. `categories` 为空，或规范化后只包含 `general`；
+6. 没有显式 `engines`。
+
+provider 的 `available()` 必须先用 `resolveSecretValue` 解析 `env:` 再判空（CLI 传入的
+可能是 `env:DEEPSEEK_API_KEY` 原文）；`enabled()` 严格要求
+`search.deepseek.enabled === true`，缺省为 false。
+
+`minScore` 由 provider 在**源内**处理：raw 按 `rerank_score / 3 >= minScore` 过滤，
+harness 忽略它；服务层不再对上游结果做全局 `minScore` 过滤。空结果返回
+`ok: true, results: []`；调用失败返回 `ok: false`，由服务层静默降级并追加说明。
+
+融合规则：
+
+- 每个源清洗后做**源内名次归一化**：第 1 名 `1.0`，第 2 名 `(n - 1) / n`，最后一名 `1 / n`；
+- 按规范化 URL 去重合并：`engines` 取并集，`content` / `title` /
+  `publishedDate` 空则补齐，`score` 取较大值；
+- 最终按 `score × engine_boost` 稳定降序；`engine_boost` 先看 `engines`，再看
+  `engine`。多上游分支不再调用 `rerankResults`，避免二次 boost；
+- raw 的官方 `rerank_score` 只用于源内排序与源内 `min_score`；harness 没有原始分，
+  不参与 `min_score`，但同样通过名次归一化获得跨源可比的分数；
+- 失败只影响该源：结果末尾追加提示；只有 searxng 与所有通用上游都失败才报错；
+- 启用但不可用（如未配 key）或任一源失败时，本次结果**不写缓存**；
+- `SearchMetrics.generalUpstreams` 记录每个通用上游的 `id / ok / results / ms /
+  error`（仅多上游分支填充）。
+
+CLI 支持 `asg engines list/enable/disable/secret`；`route` 不支持通用上游，报
+`ENGINE_NO_ROUTING`。v1 **不向第三方插件开放**该组，只允许内置 provider。
+
+新增内置通用上游需要：provider 文件、`registry.ts` 注册行、`settings/schema.ts` 的
+配置段与 `settings/secrets.ts` 的密钥段；运行期参与条件与融合逻辑由服务层统一处理。
+
 ## 4. CLI 与运行期如何消费
 
 ### CLI
@@ -144,7 +206,8 @@ enabled: (ctx) => ctx.pluginConfig?.enabled !== false,
 
 - 遍历 `providersForGroup("gateway.reverse_image")` 生成记录：`id/name/kind` 直接取 provider，`enabled` 由 `search.reverse_image.sources` 决定，`available/routing/requires` 调 provider；
 - 遍历 `providersForGroup("gateway.search")` 生成记录，`enabled` / `available` / `routing` / `requires` 全部来自 provider（含 loader 施加的 `extensions` 覆盖）；
-- **写入仍由 store 负责**：reverse_image 增删 `sources` 数组；文本源按 provider 的 `enabledPath` 写布尔值。provider 不碰 YAML。
+- 遍历 `providersForGroup("gateway.upstream")` 生成记录，`enabled` 按 provider 的 `enabledPath`（如 `search.deepseek.enabled`）读取；该组不支持 `route`；
+- **写入仍由 store 负责**：reverse_image 增删 `sources` 数组；文本源与通用上游按 provider 的 `enabledPath` 写布尔值。provider 不碰 YAML。
 
 ### 运行期
 
@@ -152,6 +215,7 @@ enabled: (ctx) => ctx.pluginConfig?.enabled !== false,
 
 - 反向图搜：遍历 `search.reverse_image.sources`，用 `engineProvider("gateway.reverse_image", name)` 找 provider；未知源或 `available() === false` 直接跳过；`runtime.search(imageInput, ctx)` 与 searxng 并发。
 - 文本源：在请求 searxng 之前遍历 `providersForGroup("gateway.search")`，`available()` + `enabled()` + `runtime.plan(params.categories)` 命中即调用 `runtime.search()`，完全不经过 searxng。
+- 通用上游：遍历 `providersForGroup("gateway.upstream")`，按 3.2 的条件筛选后与 searxng 批次**并发**；成功结果先清洗、再做源内名次归一化，最后与 searxng 结果按 URL 合并并按 `score × engine_boost` 排序。失败只追加提示，不阻断 searxng。
 
 ## 5. 注册边界
 
@@ -170,4 +234,6 @@ enabled: (ctx) => ctx.pluginConfig?.enabled !== false,
 - `service.ts` 的文本源 `limit` 仍取 `search.weibo.limit`；新增需要独立上限的文本源时，要扩展 `GatewaySearchPlan` / `GatewaySearchOptions`。
 - 新文本源如果带独立配置段，**内置 provider** 仍需同步 `settings/schema.ts`；
   第三方扩展改用 manifest 的 `config_schema` + `extensions.<id>.config`，不再改核心 schema。
+- 通用上游（`gateway.upstream`）v1 只内置：`extensions/loader.ts` 不把该组加入第三方
+  allowlist；新增内置源需同时改 `settings/schema.ts` 与 `settings/secrets.ts`。
 - 以图搜图源仍需同步 `GATEWAY_SOURCES` / `GATEWAY_SOURCE_SPECS`，schema 枚举才能接受新名字。

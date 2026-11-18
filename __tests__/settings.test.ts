@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadSettings } from "../src/settings/index.js";
+import { defaultSettings, loadSettings } from "../src/settings/index.js";
 
 const dirs: string[] = [];
 
@@ -63,6 +63,7 @@ describe("loadSettings (gateway.yaml + secrets.yaml)", () => {
     expect(secrets.gateway.token).toBe("");
     expect(secrets.embedding.api_key).toBe("");
     expect(secrets.search.reverse_image.saucenao.api_key).toBe("");
+    expect(secrets.search.deepseek.api_key).toBe("");
     expect(secrets.bilibili.http.token).toBe("");
     expect(secrets.browser.proxy_password).toBe("");
   });
@@ -408,5 +409,72 @@ extensions:
     );
     const { secrets } = load(d, { WEIBO_COOKIE: "cookie-value" });
     expect(secrets.extensions["gateway.search:weibo"]).toEqual({ cookie: "cookie-value" });
+  });
+});
+
+describe("search.deepseek（通用上游）", () => {
+  it("默认关闭，raw 模式与默认地址 / 超时", () => {
+    const deepseek = defaultSettings().search.deepseek;
+
+    expect(deepseek).toEqual({
+      enabled: false,
+      mode: "raw",
+      limit: 10,
+      api: {
+        base_url: "https://api.deepseek.com/v1/tools",
+        need_content: false,
+        localization: "",
+        timeout_ms: 20000,
+      },
+      harness: {
+        base_url: "https://api.deepseek.com/anthropic/v1",
+        model: "deepseek-flash",
+        max_tokens: 4096,
+        api_version: "2023-06-01",
+        timeout_ms: 60000,
+      },
+    });
+  });
+
+  it("未知 search.deepseek 字段被 strict 拒绝", () => {
+    const cases = [
+      "search:\n  deepseek:\n    bogus: 1\n",
+      "search:\n  deepseek:\n    api:\n      bogus: 1\n",
+      "search:\n  deepseek:\n    harness:\n      bogus: 1\n",
+    ];
+
+    for (const text of cases) {
+      const d = tempDir();
+      writeFile(d, "gateway.yaml", text);
+      expect(() => load(d), text).toThrow(/校验失败/);
+    }
+  });
+
+  it("secrets.yaml 的 search.deepseek.api_key 可加载", () => {
+    const d = tempDir();
+    writeFile(d, "gateway.yaml", "gateway:\n  host: 127.0.0.1\n");
+    writeFile(d, "secrets.yaml", "search:\n  deepseek:\n    api_key: ds-file-key\n");
+
+    const { secrets } = load(d);
+    expect(secrets.search.deepseek.api_key).toBe("ds-file-key");
+  });
+
+  it("DEEPSEEK_API_KEY 环境变量覆盖 secrets.yaml，空值不覆盖", () => {
+    const d = tempDir();
+    writeFile(d, "gateway.yaml", "gateway:\n  host: 127.0.0.1\n");
+    writeFile(d, "secrets.yaml", "search:\n  deepseek:\n    api_key: ds-file-key\n");
+
+    expect(load(d, { DEEPSEEK_API_KEY: "ds-env-key" }).secrets.search.deepseek.api_key).toBe(
+      "ds-env-key",
+    );
+    expect(load(d, { DEEPSEEK_API_KEY: "" }).secrets.search.deepseek.api_key).toBe("ds-file-key");
+  });
+
+  it("gateway.yaml 出现 search.deepseek.api_key → 迁移报错", () => {
+    const d = tempDir();
+    writeFile(d, "gateway.yaml", "search:\n  deepseek:\n    api_key: leaked\n");
+
+    expect(() => load(d)).toThrow(/迁移到 secrets\.yaml/);
+    expect(() => load(d)).toThrow(/search\.deepseek\.api_key/);
   });
 });

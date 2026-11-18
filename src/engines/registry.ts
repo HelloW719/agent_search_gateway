@@ -11,11 +11,13 @@ import type { EngineGroup } from "./types.js";
 import { tracemoeProvider } from "./providers/tracemoe.js";
 import { saucenaoProvider } from "./providers/saucenao.js";
 import { baiduProvider } from "./providers/baidu.js";
+import { deepseekProvider } from "./providers/deepseek.js";
 
 export const ENGINE_PROVIDERS: readonly EngineProvider[] = [
   tracemoeProvider,
   saucenaoProvider,
   baiduProvider,
+  deepseekProvider,
 ];
 
 // 内置 provider 的 id 是编程契约；重复说明注册表写错了，直接 fail fast。
