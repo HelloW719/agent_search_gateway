@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 
 const REPO_ROOT = process.cwd();
@@ -135,18 +136,19 @@ function makeRoot(): string {
 
 function installPlugin(
   root: string,
-  plugin: { id: string; version: string; backends?: string[] },
+  plugin: { id: string; version: string; backends?: string[]; apiVersion?: 1 | 2 },
 ): void {
   const dir = join(root, "data", "extensions", plugin.id);
   mkdirSync(dir, { recursive: true });
+  const apiVersion = plugin.apiVersion ?? 1;
   writeFileSync(
-    join(dir, "asg-plugin.json"),
+    join(dir, apiVersion === 2 ? "asg-extension.json" : "asg-plugin.json"),
     JSON.stringify(
       {
         id: plugin.id,
         name: plugin.id,
         version: plugin.version,
-        api_version: 1,
+        api_version: apiVersion,
         provides: ["search"],
         entry: "index.mjs",
         backends: plugin.backends ?? [],
@@ -158,9 +160,11 @@ function installPlugin(
 }
 
 function readManifest(root: string, id: string): { version?: string } {
-  return JSON.parse(
-    readFileSync(join(root, "data", "extensions", id, "asg-plugin.json"), "utf8"),
-  );
+  const dir = join(root, "data", "extensions", id);
+  const file = existsSync(join(dir, "asg-extension.json"))
+    ? "asg-extension.json"
+    : "asg-plugin.json";
+  return JSON.parse(readFileSync(join(dir, file), "utf8"));
 }
 
 function writeChecklist(
@@ -300,7 +304,7 @@ describe("0.3.x 迁移脚本：阶段顺序", () => {
     expect(state.phases.preflight.status).toBe("done");
     expect(state.phases.plugins.status).toBe("done");
     expect(state.phases.backends.status).toBe("done");
-    expect(state.phases.config.status).toBe("skipped");
+    expect(state.phases.config.status).toBe("done");
     expect(state.phases.restart.status).toBe("done");
     expect(state.plugins.weibo).toMatchObject({
       from: "0.1.0",
@@ -314,16 +318,72 @@ describe("0.3.x 迁移脚本：阶段顺序", () => {
     ).toBe(true);
   });
 
-  it("config 阶段 P1 跳过但不判失败", () => {
+  it("config 阶段迁移平台配置与密钥到 extensions", () => {
     const root = makeRoot();
+    writeFileSync(
+      join(root, "gateway.yaml"),
+      [
+        "gateway:",
+        "  host: 127.0.0.1",
+        "  port: 3999",
+        "bilibili:",
+        "  enabled: true",
+        "  http:",
+        "    base_url: http://127.0.0.1:8010",
+        "weibo:",
+        "  enabled: true",
+        "search:",
+        "  weibo:",
+        "    limit: 7",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(root, "secrets.yaml"),
+      ["bilibili:", "  http:", "    token: secret-token", ""].join("\n"),
+    );
     installPlugin(root, { id: "weibo", version: "0.2.0" });
     const manifest = writeChecklist([{ id: "weibo", repo: WEIBO, version: "0.2.0" }]);
 
     const result = run(root, ["--phase", "config"], { manifest });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("P2");
-    expect(readState(root).phases.config.status).toBe("skipped");
+
+    const gateway = parse(readFileSync(join(root, "gateway.yaml"), "utf8"));
+    expect(gateway.bilibili).toBeUndefined();
+    expect(gateway.weibo).toBeUndefined();
+    expect(gateway.search.weibo).toBeUndefined();
+    expect(gateway.extensions.weibo.config).toEqual({
+      enabled: true,
+      search: { limit: 7 },
+    });
+    expect(gateway.extensions.bilibili.config).toEqual({
+      enabled: true,
+      http: { base_url: "http://127.0.0.1:8010" },
+    });
+
+    const secrets = parse(readFileSync(join(root, "secrets.yaml"), "utf8"));
+    expect(secrets.bilibili).toBeUndefined();
+    expect(secrets.extensions.bilibili.token).toBe("secret-token");
+    expect(readState(root).phases.config.status).toBe("done");
     expect(calls(root)).toEqual([]);
+  });
+
+  it("识别 asg-extension.json 的 V2 manifest", () => {
+    const root = makeRoot();
+    installPlugin(root, {
+      id: "weibo",
+      version: "0.2.0",
+      apiVersion: 2,
+      backends: ["article"],
+    });
+    const manifest = writeChecklist([{ id: "weibo", repo: WEIBO, version: "0.2.0" }]);
+
+    const result = run(root, ["--phase", "backends"], {
+      manifest,
+      env: { ASG_FAKE_BACKENDS: JSON.stringify({ weibo: ["article"] }) },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls(root).some((call) => call.cmd === "setup" && call.id === "weibo")).toBe(true);
   });
 });
 

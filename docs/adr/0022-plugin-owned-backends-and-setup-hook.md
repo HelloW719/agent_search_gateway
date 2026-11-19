@@ -126,8 +126,8 @@ CLI 或浏览器依赖仍没有统一的安装生命周期。把后端继续留�
 
    0.3.x 期间提供一次性脚本，按 `preflight → plugins → backends → config → restart`
    执行；插件升级用 `extensions install ... --no-setup`，后端安装用
-   `extensions setup <id>`。`config` 阶段仍是占位（skipped）；旧配置键/密钥迁移不在
-   本版本范围内。0.4.x 起删除整个 `scripts/migrations/`。`--dry-run` / `--resume` / `--rollback` /
+   `extensions setup <id>`。`config` 阶段把旧平台配置/密钥迁到
+   `extensions.<plugin-id>`。0.4.x 起删除整个 `scripts/migrations/`。`--dry-run` / `--resume` / `--rollback` /
    `--rollback-on-failure` / `--continue-on-error` / `--plugin` / `--jsonl` 等行为以脚本
    的 README 为准。
 

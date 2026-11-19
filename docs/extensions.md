@@ -841,9 +841,9 @@ asg extensions secret weibo --name cookie --stdin
 - **旧 CLI 名称**：`asg plugins install/remove <name>` 仍可用。命中已安装 manifest 的
   `backends[].id` / `aliases` 时走新 setup；未命中才回退旧安装器。
 - **临时迁移脚本**：`scripts/migrations/0.3.x.mjs` 在 0.3.x 期间按
-  `preflight → plugins → backends → config → restart` 执行；`config` 阶段仍是占位，
-  只标记 skipped。旧配置键/密钥的迁移不在本版本范围内；0.4.x 起删除整个目录。
-  细节见 `scripts/migrations/README.md`。
+  `preflight → plugins → backends → config → restart` 执行；`config` 阶段把
+  `bilibili` / `weibo` / `search.weibo` 与旧 bilibili 密钥迁到 `extensions.<id>`。
+  0.4.x 起删除整个目录，细节见 `scripts/migrations/README.md`。
 - **阶段边界**：本文只描述已实现的安装/setup/CLI 契约。本版本不迁移旧配置，也不执行
   0.4.x 的清理；不要把迁移脚本的占位阶段当作已完成能力。
 

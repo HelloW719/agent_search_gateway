@@ -2,13 +2,19 @@
 
 本目录是 **0.3.x 兼容版本的一次性过渡工具**，不进入运行时，也不属于稳定 CLI。
 
-P1 只实现四段：
+五段：
 
 ```
-preflight -> plugins -> backends -> restart
+preflight -> plugins -> backends -> config -> restart
 ```
 
-`config` 阶段保留为占位，P2 再补。**0.4.x 起整个 `scripts/migrations/` 目录删除。**
+`config` 阶段把旧平台配置迁到 `extensions.<plugin-id>`：
+
+- `gateway.yaml`：`bilibili` / `weibo` → `extensions.<id>.config`；
+  `search.weibo` → `extensions.weibo.config.search`
+- `secrets.yaml`：`bilibili.http.token` → `extensions.bilibili.token`
+
+**0.4.x 起整个 `scripts/migrations/` 目录删除。**
 
 > **与插件契约的关系**：本脚本只调用公开 CLI，不 import 网关内部模块，也不属于插件
 > 契约。后端由插件 `setup` 安装到 `data/extension-data/<id>/backends/<backend-id>/`；
@@ -74,14 +80,14 @@ node scripts/migrations/0.3.x.mjs --jsonl
 | `--jsonl` | 所有日志为 NDJSON 事件，最后一行为 `result` |
 | `-h`, `--help` | 帮助 |
 
-## 四个阶段的含义
+## 五个阶段的含义
 
 ### preflight
 
 - 解析安装根，检查 Node.js 版本（>= 20）；
 - 备份 `gateway.yaml` / `secrets.yaml` 到
   `data/migrations/0.3.x/backup-<时间>/`（文件不存在时跳过并告警）；
-- 读取清单、扫描 `data/extensions/*/asg-plugin.json`、生成计划；
+- 读取清单、扫描 `data/extensions/*/asg-extension.json`（V2）或 `asg-plugin.json`（V1）、生成计划；
 - `--dry-run` 到此结束。
 
 ### plugins
@@ -108,10 +114,16 @@ setup 必须可重复执行：已安装的后端应被插件识别并跳过/升�
 `data/extension-data/<id>/`，升级插件目录不会删除它。旧 `data/backends` 只读，插件应复制到
 新目录而不是移动。
 
-### config（P1 跳过）
+### config
 
-P1 不写任何配置，只打印“P2 启用”。P2 会在这里迁移旧配置键/密钥；P1 执行不会被此阶段
-判为失败。
+把平台配置和密钥迁到插件私有配置：
+
+- `gateway.yaml` 的顶层 `bilibili` / `weibo` 段 → `extensions.<id>.config`；
+- `search.weibo` → `extensions.weibo.config.search`；
+- `secrets.yaml` 的 `bilibili.http.token` → `extensions.bilibili.token`。
+
+迁移使用 `yaml` 的 Document API，尽量保留注释。旧键删除后再启动，strict schema
+不会因为未知字段失败。没有需要迁移的键时该阶段直接完成。
 
 ### restart
 

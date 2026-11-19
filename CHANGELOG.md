@@ -14,7 +14,8 @@
 - setup 宿主：独立子进程 + IPC，提供文件、https 下载、SHA256、解压、命令执行、`extensions.<id>.config`、state 与 backendState 能力。
 - 插件数据目录 `data/extension-data/<id>/`，与 `data/extensions/<id>/` 分离；插件更新不再丢后端。
 - `asg extensions install|setup|remove` 增加后端生命周期：默认安装全部声明后端，支持 `--backend`、`--no-setup`、`--status`、`--uninstall`、`--keep-data`、`--force`。
-- 新增 0.3.x 临时迁移脚本 `scripts/migrations/0.3.x.mjs`：分段 preflight → plugins → backends → config（占位跳过）→ restart，支持 dry-run、resume、rollback 与 jsonl。
+- 新增 0.3.x 临时迁移脚本 `scripts/migrations/0.3.x.mjs`：分段 preflight → plugins → backends → config → restart，支持 dry-run、resume、rollback 与 jsonl。
+- 迁移脚本支持 V2 `asg-extension.json`；config 阶段把旧平台配置/密钥迁到 `extensions.<plugin-id>`。
 - 新增 ADR-0022：插件自管后端与 setup 钩子。
 
 ### Changed

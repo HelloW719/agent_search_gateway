@@ -3,8 +3,9 @@
  * agent_search_gateway 0.3.x 临时升级/迁移脚本（P1）
  *
  * 目标：把 0.3.x 官方插件分段升级到兼容版本，并让插件安装自己的后端。
- * P1 只实现 preflight -> plugins -> backends -> restart；config 阶段留空，
- * P2 再补。0.4.x 起删除本目录。
+ * 五个阶段：preflight -> plugins -> backends -> config -> restart。
+ * config 阶段把平台配置/密钥迁到 extensions.<plugin-id>，供 V2 插件读取。
+ * 0.4.x 起删除本目录。
  *
  * 设计约束：
  *   - 纯 Node ESM，不引入依赖；
@@ -38,8 +39,8 @@ const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/;
 
 const USAGE = `用法: node scripts/migrations/0.3.x.mjs [选项]
 
-0.3.x 临时迁移脚本：分阶段升级官方插件并安装插件后端。
-P1 阶段：preflight -> plugins -> backends -> restart（config 留到 P2）。
+0.3.x 临时迁移脚本：分阶段升级官方插件、安装插件后端并迁移平台配置。
+阶段：preflight -> plugins -> backends -> config -> restart。
 
 选项:
   --root <dir>              安装根；缺省从脚本位置向上查找 gateway.yaml / data/current*
@@ -144,10 +145,9 @@ function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function writeJsonAtomic(file, value) {
+async function writeTextAtomic(file, text) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  const text = `${JSON.stringify(value, null, 2)}\n`;
   await fsp.writeFile(temp, text, "utf8");
   try {
     await fsp.rename(temp, file);
@@ -156,6 +156,10 @@ async function writeJsonAtomic(file, value) {
     await fsp.rm(file, { force: true });
     await fsp.rename(temp, file);
   }
+}
+
+async function writeJsonAtomic(file, value) {
+  await writeTextAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +380,9 @@ function normalizeBackends(value) {
   return value.filter((item) => item !== null && item !== undefined);
 }
 
-/** 扫描 data/extensions/<dir>/asg-plugin.json；坏包只标记该条。 */
+const MANIFEST_NAMES = ["asg-extension.json", "asg-plugin.json"];
+
+/** 扫描 data/extensions/<dir> 的 V2 / V1 manifest；坏包只标记该条。 */
 export async function scanInstalledExtensions(root) {
   const base = path.join(root, "data", "extensions");
   let entries;
@@ -391,7 +397,8 @@ export async function scanInstalledExtensions(root) {
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const dir = path.join(base, entry.name);
-    const manifestPath = path.join(dir, "asg-plugin.json");
+    const manifestName = MANIFEST_NAMES.find((name) => existsSync(path.join(dir, name)));
+    const manifestPath = manifestName ? path.join(dir, manifestName) : null;
     const item = {
       id: entry.name,
       dirName: entry.name,
@@ -402,20 +409,26 @@ export async function scanInstalledExtensions(root) {
       error: null,
     };
 
+    if (!manifestPath) {
+      item.error = `未找到 ${MANIFEST_NAMES.join(" 或 ")}`;
+      installed.push(item);
+      continue;
+    }
+
     let manifest;
     try {
       manifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
     } catch (error) {
       item.error =
         error?.code === "ENOENT"
-          ? "未找到 asg-plugin.json"
-          : `无法读取 asg-plugin.json：${messageOf(error)}`;
+          ? `未找到 ${MANIFEST_NAMES.join(" 或 ")}`
+          : `无法读取 ${manifestName}：${messageOf(error)}`;
       installed.push(item);
       continue;
     }
 
     if (!isPlainObject(manifest)) {
-      item.error = "asg-plugin.json 不是对象";
+      item.error = `${manifestName} 不是对象`;
       installed.push(item);
       continue;
     }
@@ -1085,7 +1098,7 @@ async function runPreflight(ctx, { dryRun = false } = {}) {
     throw new MigrationError(`未找到 CLI 入口：${cli}（请先安装或执行 npm run build）`, 1);
   }
   if (!existsSync(path.join(ctx.root, "gateway.yaml"))) {
-    ctx.out.log("未找到 gateway.yaml；配置备份将为空（P1 不修改配置）", "warn");
+    ctx.out.log("未找到 gateway.yaml；config 阶段会跳过配置迁移", "warn");
   }
 
   await backupConfigs(ctx);
@@ -1269,9 +1282,130 @@ async function runBackendsPhase(ctx) {
   };
 }
 
-function runConfigPhase(ctx) {
-  ctx.out.log("config 阶段 P1 未实现，P2 启用；本阶段跳过");
-  return { status: "skipped", note: "P2 启用" };
+/** 平台配置从顶层段迁移到 extensions.<plugin-id>.config。 */
+const PLATFORM_CONFIG_MOVES = [
+  { pluginId: "bilibili", configKey: "bilibili", searchKey: null },
+  { pluginId: "weibo", configKey: "weibo", searchKey: "weibo" },
+];
+
+function nodeToJs(value, doc) {
+  if (value && typeof value.toJS === "function") return value.toJS(doc);
+  return value;
+}
+
+async function loadYaml() {
+  try {
+    return await import("yaml");
+  } catch (error) {
+    throw new MigrationError(
+      `config 阶段需要 yaml 依赖（${messageOf(error)}）；请在安装根执行 npm install 后重试`,
+      1,
+    );
+  }
+}
+
+function yamlDocument(parseDocument, text, file) {
+  const doc = parseDocument(text, { keepSourceTokens: true });
+  if (doc.errors.length > 0) {
+    throw new MigrationError(`${file} 不是合法 YAML：${doc.errors[0].message}`, 1);
+  }
+  const extensions = doc.get("extensions");
+  if (extensions !== undefined && !isPlainObject(nodeToJs(extensions, doc))) {
+    throw new MigrationError(`${file} 的 extensions 必须是对象`, 1);
+  }
+  return doc;
+}
+
+/** 返回是否改动；迁移顶层平台配置与 search.<platform>。 */
+function migrateGatewayDocument(doc, { out }) {
+  let changed = false;
+  for (const move of PLATFORM_CONFIG_MOVES) {
+    const configNode = doc.get(move.configKey);
+    const searchNode = move.searchKey ? doc.getIn(["search", move.searchKey]) : undefined;
+    if (configNode === undefined && searchNode === undefined) continue;
+
+    const targetPath = ["extensions", move.pluginId, "config"];
+    if (configNode !== undefined) {
+      const current = doc.getIn(targetPath);
+      if (current === undefined) {
+        doc.setIn(targetPath, nodeToJs(configNode, doc));
+      } else {
+        doc.setIn(targetPath, {
+          ...nodeToJs(current, doc),
+          ...nodeToJs(configNode, doc),
+        });
+        out.log(`extensions.${move.pluginId}.config 已存在，按旧值覆盖同名键`, "warn");
+      }
+      doc.deleteIn([move.configKey]);
+      out.log(`迁移 ${move.configKey} -> extensions.${move.pluginId}.config`);
+      changed = true;
+    }
+
+    if (searchNode !== undefined) {
+      const current = doc.getIn(targetPath);
+      const base = current === undefined ? {} : nodeToJs(current, doc);
+      const existingSearch = isPlainObject(base.search) ? base.search : {};
+      doc.setIn(targetPath, {
+        ...base,
+        search: { ...existingSearch, ...nodeToJs(searchNode, doc) },
+      });
+      doc.deleteIn(["search", move.searchKey]);
+      out.log(`迁移 search.${move.searchKey} -> extensions.${move.pluginId}.config.search`);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** 返回是否改动；bilibili.http.token -> extensions.bilibili.token。 */
+function migrateSecretsDocument(doc, { out }) {
+  const old = doc.get("bilibili");
+  if (old === undefined) return false;
+
+  const token = doc.getIn(["bilibili", "http", "token"]);
+  if (token !== undefined && doc.getIn(["extensions", "bilibili", "token"]) === undefined) {
+    doc.setIn(["extensions", "bilibili", "token"], nodeToJs(token, doc));
+    out.log("迁移 secrets.bilibili.http.token -> extensions.bilibili.token");
+  } else if (token !== undefined) {
+    out.log("extensions.bilibili.token 已存在，保留现有值", "warn");
+  }
+  doc.deleteIn(["bilibili"]);
+  return true;
+}
+
+async function runConfigPhase(ctx) {
+  const { root, out, state } = ctx;
+  if (!state.backup?.dir) {
+    out.log("config 阶段没有前置备份，先创建配置备份", "warn");
+    await backupConfigs(ctx);
+  }
+
+  const yaml = await loadYaml();
+  const changed = [];
+  for (const name of ["gateway.yaml", "secrets.yaml"]) {
+    const file = path.join(root, name);
+    if (!existsSync(file)) {
+      out.log(`未找到 ${name}，跳过`, "warn");
+      continue;
+    }
+    const text = await fsp.readFile(file, "utf8");
+    const doc = yamlDocument(yaml.parseDocument, text, name);
+    const dirty =
+      name === "gateway.yaml"
+        ? migrateGatewayDocument(doc, { out })
+        : migrateSecretsDocument(doc, { out });
+    if (!dirty) {
+      out.log(`${name} 无需迁移`);
+      continue;
+    }
+    await writeTextAtomic(file, doc.toString({ lineWidth: 0 }));
+    changed.push(name);
+  }
+
+  if (changed.length === 0) {
+    return { status: "done", note: "没有需要迁移的平台配置" };
+  }
+  return { status: "done", note: `已迁移 ${changed.join(" / ")}` };
 }
 
 /** 从 gateway.yaml 读 gateway.host / gateway.port（无 YAML 依赖）。 */
@@ -1421,7 +1555,7 @@ async function executePhase(ctx, phase) {
     if (phase === "preflight") result = await runPreflight(ctx);
     else if (phase === "plugins") result = await runPluginsPhase(ctx);
     else if (phase === "backends") result = await runBackendsPhase(ctx);
-    else if (phase === "config") result = runConfigPhase(ctx);
+    else if (phase === "config") result = await runConfigPhase(ctx);
     else if (phase === "restart") result = await runRestartPhase(ctx);
     else throw new MigrationError(`未知阶段：${phase}`, 2);
 
