@@ -5,9 +5,9 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import type { Reporter } from "../../src/cli/output.js";
 import {
   listPlugins,
-  normalizePluginInput,
   pluginAction,
   spawnStream,
+  type SetupRunner,
   type StreamRunner,
 } from "../../src/cli/deps/plugins.js";
 import { run as runPlugins } from "../../src/cli/commands/plugins.js";
@@ -35,7 +35,7 @@ function makeInstallRoot(): { root: string; cli: string } {
   return { root, cli };
 }
 
-function fakeReporter(events: Array<Record<string, unknown>>): Reporter {
+function fakeReporter(events: Array<Record<string, unknown>> = []): Reporter {
   return {
     mode: "jsonl",
     event: (event: Record<string, unknown>) => {
@@ -47,56 +47,167 @@ function fakeReporter(events: Array<Record<string, unknown>>): Reporter {
   } as unknown as Reporter;
 }
 
+function writeExtension(
+  root: string,
+  manifest: Record<string, unknown>,
+  dir = String(manifest.id),
+): string {
+  const target = path.join(root, "data", "extensions", dir);
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, "asg-plugin.json"), JSON.stringify(manifest), "utf8");
+  return target;
+}
+
+function writeBackendState(
+  root: string,
+  pluginId: string,
+  states: Record<string, unknown>,
+): void {
+  const dir = path.join(root, "data", "extension-data", pluginId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "backends.json"), JSON.stringify(states), "utf8");
+}
+
+const DEMO_MANIFEST = {
+  id: "demo-plugin",
+  name: "Demo Plugin",
+  version: "1.0.0",
+  api_version: 2,
+  provides: ["fetch"],
+  entry: "index.mjs",
+  backends: [
+    { id: "demo-backend", name: "Demo Backend", aliases: ["old-demo"] },
+    { id: "demo-cli", name: "Demo CLI" },
+  ],
+  config_schema: {
+    type: "object",
+    properties: { endpoint: { type: "string" } },
+  },
+};
+
 afterAll(() => {
   for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-describe("插件参数与名称校验", () => {
-  it("未知插件名抛 PLUGIN_UNKNOWN（退出码 4），不触碰子进程", async () => {
+describe("asg plugins facade 解析顺序", () => {
+  it("未命中 manifest 且没有旧安装脚本：PLUGIN_UNKNOWN（退出码 4）并提示 extensions install", async () => {
     const runner = vi.fn<StreamRunner>(async () => ({ code: 0, signal: null }));
+    const setup = vi.fn<SetupRunner>(async () => ({ ok: true }));
+
     await expect(
       pluginAction({
         root: tempRoot(),
         name: "nope",
         action: "install",
-        reporter: fakeReporter([]),
+        reporter: fakeReporter(),
         runner,
-      }),
-    ).rejects.toMatchObject({ code: "PLUGIN_UNKNOWN", exitCode: 4 });
-    expect(runner).not.toHaveBeenCalled();
-  });
-
-  it("cnki:http 是内置平台，报 PLUGIN_UNKNOWN 并提示无需安装", async () => {
-    const runner = vi.fn<StreamRunner>(async () => ({ code: 0, signal: null }));
-    await expect(
-      pluginAction({
-        root: tempRoot(),
-        name: "cnki:http",
-        action: "install",
-        reporter: fakeReporter([]),
-        runner,
+        setup,
       }),
     ).rejects.toMatchObject({
       code: "PLUGIN_UNKNOWN",
       exitCode: 4,
-      message: expect.stringContaining("cnki 是内置平台，无需安装"),
+      message: expect.stringContaining("asg extensions install"),
     });
     expect(runner).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
   });
 
-  it("normalizePluginInput 接受旧名、规范通道 ID 与别名", () => {
-    expect(normalizePluginInput("bili")).toBe("bili");
-    expect(normalizePluginInput("bilibili:kukemc")).toBe("bili");
-    expect(normalizePluginInput("bilibili:ytdlp")).toBe("ytdlp");
-    expect(normalizePluginInput("weibo:opencli")).toBe("opencli");
-    expect(normalizePluginInput("weibo")).toBe("opencli");
-    expect(normalizePluginInput("article")).toBe("article");
-    expect(normalizePluginInput("bilibili:http")).toBe("article");
-    expect(normalizePluginInput("cnki:http")).toBeUndefined();
-    expect(normalizePluginInput("nope")).toBeUndefined();
+  it("manifest backend aliases 命中：调用 setup，不触碰旧脚本，成功后重启", async () => {
+    const root = tempRoot();
+    writeExtension(root, DEMO_MANIFEST);
+
+    const events: Array<Record<string, unknown>> = [];
+    const setup = vi.fn<SetupRunner>(async () => ({
+      ok: true,
+      result: { installed: true },
+    }));
+    const restart = vi.fn(async () => {});
+    const runner = vi.fn<StreamRunner>(async () => ({ code: 0, signal: null }));
+
+    const result = await pluginAction({
+      root,
+      name: "old-demo",
+      action: "install",
+      reporter: fakeReporter(events),
+      setup,
+      restart,
+      runner,
+    });
+
+    expect(setup).toHaveBeenCalledTimes(1);
+    expect(setup.mock.calls[0]![0]).toMatchObject({
+      root,
+      entry: "index.mjs",
+      action: "install",
+      plugin: { id: "demo-plugin", name: "Demo Plugin", version: "1.0.0" },
+      backends: ["demo-backend"],
+      configSchema: { type: "object" },
+    });
+    expect(runner).not.toHaveBeenCalled();
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      name: "old-demo",
+      action: "install",
+      restarted: true,
+      source: "extension",
+      plugin_id: "demo-plugin",
+      backend_id: "demo-backend",
+    });
+
+    setup.mock.calls[0]![0].onLog?.("下载中");
+    expect(events[0]).toMatchObject({
+      event: "log",
+      service: "old-demo",
+      message: "下载中",
+    });
   });
 
-  it("install 拼装 --root/--json，透传事件并在成功后重启", async () => {
+  it("backend.id 精确命中时 remove 走 uninstall setup", async () => {
+    const root = tempRoot();
+    writeExtension(root, DEMO_MANIFEST);
+    const setup = vi.fn<SetupRunner>(async () => ({ ok: true }));
+    const restart = vi.fn(async () => {});
+
+    const result = await pluginAction({
+      root,
+      name: "demo-cli",
+      action: "uninstall",
+      reporter: fakeReporter(),
+      setup,
+      restart,
+    });
+
+    expect(setup.mock.calls[0]![0]).toMatchObject({
+      action: "uninstall",
+      backends: ["demo-cli"],
+    });
+    expect(result).toMatchObject({ source: "extension", backend_id: "demo-cli" });
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("manifest setup 失败：PLUGIN_FAILED，且不重启", async () => {
+    const root = tempRoot();
+    writeExtension(root, DEMO_MANIFEST);
+    const restart = vi.fn(async () => {});
+
+    await expect(
+      pluginAction({
+        root,
+        name: "old-demo",
+        action: "install",
+        reporter: fakeReporter(),
+        setup: async () => ({ ok: false, error: "下载失败" }),
+        restart,
+      }),
+    ).rejects.toMatchObject({
+      code: "PLUGIN_FAILED",
+      exitCode: 1,
+      message: expect.stringContaining("下载失败"),
+    });
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it("未命中 manifest 时回退旧脚本，name 原样透传并在成功后重启", async () => {
     const { root, cli } = makeInstallRoot();
     const events: Array<Record<string, unknown>> = [];
     const calls: Array<{ command: string; args: string[] }> = [];
@@ -104,17 +215,22 @@ describe("插件参数与名称校验", () => {
     const runner: StreamRunner = async (command, args, options) => {
       calls.push({ command, args });
       options?.onLine?.(
-        JSON.stringify({ type: "event", event: "log", service: "bili", message: "下载中" }),
+        JSON.stringify({
+          type: "event",
+          event: "log",
+          service: "legacy-name",
+          message: "下载中",
+        }),
         "stdout",
       );
-      options?.onLine?.("[bili] 普通文本", "stderr");
+      options?.onLine?.("[legacy-name] 普通文本", "stderr");
       return { code: 0, signal: null };
     };
     const restart = vi.fn(async () => {});
 
     const result = await pluginAction({
       root,
-      name: "bili",
+      name: "legacy-name",
       action: "install",
       reporter: fakeReporter(events),
       runner,
@@ -122,180 +238,157 @@ describe("插件参数与名称校验", () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.args).toEqual([cli, "bili", "install", "--root", root, "--json"]);
     expect(calls[0]!.command).toBe(process.execPath);
-    expect(result).toEqual({ name: "bili", action: "install", restarted: true });
+    expect(calls[0]!.args).toEqual([
+      cli,
+      "legacy-name",
+      "install",
+      "--root",
+      root,
+      "--json",
+    ]);
     expect(restart).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      name: "legacy-name",
+      action: "install",
+      restarted: true,
+      source: "legacy",
+    });
 
-    expect(events[0]).toMatchObject({ event: "log", service: "bili", message: "下载中" });
+    expect(events[0]).toMatchObject({
+      event: "log",
+      service: "legacy-name",
+      message: "下载中",
+    });
     expect(events[0]).not.toHaveProperty("type");
-    expect(events[1]).toMatchObject({ event: "log", service: "bili", line: "[bili] 普通文本" });
+    expect(events[1]).toMatchObject({
+      event: "log",
+      service: "legacy-name",
+      line: "[legacy-name] 普通文本",
+    });
   });
 
-  it("install 规范通道 ID 归一化成安装名", async () => {
-    for (const [input, expected] of [
-      ["bilibili:ytdlp", "ytdlp"],
-      ["weibo:opencli", "opencli"],
-      ["bilibili:article", "article"],
-      ["bilibili:kukemc", "bili"],
-    ] as const) {
-      const { root, cli } = makeInstallRoot();
-      const calls: Array<{ command: string; args: string[] }> = [];
-      const runner: StreamRunner = async (command, args) => {
-        calls.push({ command, args });
-        return { code: 0, signal: null };
-      };
-
-      const result = await pluginAction({
-        root,
-        name: input,
-        action: "install",
-        reporter: fakeReporter([]),
-        runner,
-        restart: async () => {},
-      });
-
-      expect(calls[0]!.args).toEqual([cli, expected, "install", "--root", root, "--json"]);
-      expect(result.name).toBe(expected);
-    }
-  });
-
-  it("remove 传 uninstall；失败抛 PLUGIN_FAILED 并带 previous.json 路径，不重启", async () => {
+  it("旧脚本失败：PLUGIN_FAILED 并带 previous.json 路径，不重启", async () => {
     const { root } = makeInstallRoot();
     const restart = vi.fn(async () => {});
-    const events: Array<Record<string, unknown>> = [];
-
-    const runner: StreamRunner = async () => ({ code: 2, signal: null });
 
     await expect(
       pluginAction({
         root,
-        name: "article",
+        name: "legacy-name",
         action: "uninstall",
-        reporter: fakeReporter(events),
-        runner,
+        reporter: fakeReporter(),
+        runner: async () => ({ code: 2, signal: null }),
         restart,
       }),
     ).rejects.toMatchObject({
       code: "PLUGIN_FAILED",
       exitCode: 1,
-      message: expect.stringContaining("data/backends/article-server/previous.json"),
+      message: expect.stringContaining("data/backends/legacy-name/previous.json"),
     });
     expect(restart).not.toHaveBeenCalled();
   });
 });
 
-describe("插件列表", () => {
-  it("读 version.json 与 gateway.yaml，离线输出 installed/enabled/version/path", () => {
+describe("插件列表（通用扫描）", () => {
+  it("manifest backends + backends.json 状态 + 旧 data/backends 目录", () => {
     const root = tempRoot();
-    const backends = path.join(root, "data", "backends");
-    for (const [dir, version] of [
-      ["bili", "1.2.3"],
-      ["article-server", "0.4.0"],
-    ] as const) {
-      fs.mkdirSync(path.join(backends, dir), { recursive: true });
-      fs.writeFileSync(
-        path.join(backends, dir, "version.json"),
-        `${JSON.stringify({ name: dir, version })}\n`,
-        "utf8",
-      );
-    }
-
+    writeExtension(root, DEMO_MANIFEST);
+    writeBackendState(root, "demo-plugin", {
+      "demo-backend": {
+        installed: true,
+        enabled: true,
+        version: "1.2.3",
+        path: "/opt/demo",
+      },
+    });
+    // 没有状态文件条目，但 backend 目录存在：仍视为已安装。
+    fs.mkdirSync(
+      path.join(root, "data", "extension-data", "demo-plugin", "backends", "demo-cli"),
+      { recursive: true },
+    );
+    // aliases 已覆盖的旧目录不应重复出现。
+    fs.mkdirSync(path.join(root, "data", "backends", "old-demo"), { recursive: true });
+    // 未被覆盖的旧安装。
+    const legacyDir = path.join(root, "data", "backends", "legacy-dir");
+    fs.mkdirSync(legacyDir, { recursive: true });
     fs.writeFileSync(
-      path.join(root, "gateway.yaml"),
-      [
-        "bilibili:",
-        "  cli_kukemc:",
-        "    command: /opt/bili",
-        "  cli_ytdlp:",
-        "    command: \"\"",
-        "  http:",
-        "    command: [python, server.py]",
-        "",
-      ].join("\n"),
+      path.join(legacyDir, "version.json"),
+      `${JSON.stringify({ version: "9.9.9" })}\n`,
       "utf8",
     );
 
     const plugins = listPlugins(root);
-    expect(plugins.map((plugin) => plugin.name)).toEqual(["bili", "ytdlp", "opencli", "article"]);
+    expect(plugins.map((plugin) => plugin.name)).toEqual([
+      "old-demo",
+      "demo-cli",
+      "legacy-dir",
+    ]);
 
-    const bili = plugins.find((plugin) => plugin.name === "bili")!;
-    expect(bili).toMatchObject({
-      platform: "bilibili",
-      channel: "kukemc",
-      channel_id: "bilibili:kukemc",
+    expect(plugins[0]).toMatchObject({
+      name: "old-demo",
+      plugin_id: "demo-plugin",
+      backend_id: "demo-backend",
+      aliases: ["old-demo"],
+      platform: "",
+      channel: "",
+      channel_id: "",
       installed: true,
+      enabled: true,
       version: "1.2.3",
-      enabled: true,
-      path: path.join(backends, "bili"),
+      path: "/opt/demo",
     });
-
-    expect(plugins.find((plugin) => plugin.name === "ytdlp")).toMatchObject({
-      platform: "bilibili",
-      channel: "ytdlp",
-      channel_id: "bilibili:ytdlp",
-      installed: false,
-      enabled: false,
-    });
-    expect(plugins.find((plugin) => plugin.name === "opencli")).toMatchObject({
-      platform: "weibo",
-      channel: "opencli",
-      channel_id: "weibo:opencli",
-      installed: false,
-      enabled: false,
-    });
-    expect(plugins.find((plugin) => plugin.name === "article")).toMatchObject({
-      platform: "bilibili",
-      channel: "article",
-      channel_id: "bilibili:article",
+    expect(plugins[1]).toMatchObject({
+      name: "demo-cli",
+      plugin_id: "demo-plugin",
+      backend_id: "demo-cli",
       installed: true,
-      version: "0.4.0",
-      enabled: true,
-      path: path.join(backends, "article-server"),
+      enabled: false,
+    });
+    expect(plugins[2]).toMatchObject({
+      name: "legacy-dir",
+      platform: "",
+      channel: "",
+      channel_id: "",
+      installed: true,
+      enabled: false,
+      version: "9.9.9",
+      path: legacyDir,
     });
   });
 
-  it("list 表格含 PLATFORM / CHANNEL 列", async () => {
+  it("asg plugins list 输出 deprecation 提示与 JSON 数据", async () => {
     const root = tempRoot();
-    const result = await runPlugins({ root, reporter: fakeReporter([]), rest: ["list"] });
+    writeExtension(root, DEMO_MANIFEST);
+    writeBackendState(root, "demo-plugin", {
+      "demo-backend": { installed: true, version: "1.0.0" },
+    });
+
+    const result = await runPlugins({
+      root,
+      reporter: fakeReporter(),
+      rest: ["list"],
+    });
+
     expect(result.human).toContain("NAME");
-    expect(result.human).toContain("PLATFORM");
-    expect(result.human).toContain("CHANNEL");
-    expect(result.human).toContain("bilibili");
-    expect(result.human).toContain("kukemc");
+    expect(result.human).toContain("已弃用");
+    expect(result.human).toContain("asg extensions install/setup/remove");
     expect(result.data).toMatchObject({
+      deprecated: expect.stringContaining("已弃用"),
       plugins: expect.arrayContaining([
         expect.objectContaining({
-          name: "bili",
-          platform: "bilibili",
-          channel: "kukemc",
-          channel_id: "bilibili:kukemc",
-        }),
-        expect.objectContaining({
-          name: "opencli",
-          platform: "weibo",
-          channel: "opencli",
-          channel_id: "weibo:opencli",
+          name: "old-demo",
+          plugin_id: "demo-plugin",
+          backend_id: "demo-backend",
+          installed: true,
+          version: "1.0.0",
         }),
       ]),
     });
   });
 
-  it("gateway.yaml 缺失时仍可列出已安装插件", () => {
-    const root = tempRoot();
-    fs.mkdirSync(path.join(root, "data", "backends", "ytdlp"), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, "data", "backends", "ytdlp", "version.json"),
-      `${JSON.stringify({ version: "2026.01.01" })}\n`,
-      "utf8",
-    );
-
-    const plugins = listPlugins(root);
-    expect(plugins.find((plugin) => plugin.name === "ytdlp")).toMatchObject({
-      installed: true,
-      version: "2026.01.01",
-      enabled: false,
-    });
+  it("没有 manifest 与旧目录时返回空列表", () => {
+    expect(listPlugins(tempRoot())).toEqual([]);
   });
 });
 

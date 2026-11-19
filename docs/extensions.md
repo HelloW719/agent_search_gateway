@@ -1,22 +1,43 @@
-# 第三方扩展：声明与安装
+# 第三方扩展：声明、安装与后端 setup
 
-本文说明第三方插件（extension）的 manifest、发布资产、安装目录与 `asg extensions` 命令。
+本文说明第三方插件（extension）的 manifest、`setup` 钩子、安装/数据目录与
+`asg extensions` 命令。
 
-> **当前范围**：插件声明、安装薄层与运行时加载。网关启动（或 `asg engines list`）时会扫描
-> `data/extensions` 并 import 已安装插件；安装命令本身仍**不会重启**网关，需要重启一次让新插件生效。
-> 权限与沙箱仍留到后续版本。
+> **当前范围（P1）**：插件声明、安装薄层、插件自管后端（setup 钩子）与运行时加载。
+> `api_version: 2` 允许在 manifest 里声明 `backends`；插件通过入口导出的 `setup(ctx)`
+> 自行安装/更新/卸载后端。网关启动（或 `asg engines`）时会扫描 `data/extensions` 并
+> import 已安装插件；**安装、setup、卸载都不会自动重启网关**，需要重启一次让变更生效。
+> `config` / `secret` 写的是网关配置文件，仍会整栈重启。
+>
+> 阶段边界：0.3.x 迁移脚本的 `config` 阶段仍是占位（P2 才补）；`scripts/migrations/`
+> 计划在 0.4.x 删除。本文不表示这两件事已经完成。
 
-## 1. 安装目录与状态
+## 1. 目录布局
 
-- 安装根目录：`<root>/data/extensions/<id>/`
-- **目录存在即视为已安装**，不额外维护注册表或数据库；目录名必须与 manifest 的 `id` 一致。
+| 路径 | 用途 | 插件可写 |
+| --- | --- | --- |
+| `<root>/data/extensions/<id>/` | 已安装插件目录：`asg-plugin.json`、入口与插件自带只读资源 | 否 |
+| `<root>/data/extension-data/<id>/` | 插件数据目录：`state.json`、`backends.json`、`backends/<backend-id>/`、`tmp/` | 是 |
+| `<root>/data/backends/<name>/` | 0.3.x 旧后端的安装目录，只作为迁移读取源 | 否（经 setup 宿主写入会被拒绝） |
+| `<root>/gateway.yaml` | 网关配置；`extensions.<id>.config` 由 CLI 或 setup 配置 API 写入 | 仅 config API |
+| `<root>/secrets.yaml` | 密钥；由 `asg extensions secret` 写入 | setup 无写接口 |
+
+- 安装根目录是 `data/extensions/<id>/`，**目录存在即视为已安装**；目录名必须等于
+  manifest 的 `id`，没有额外注册表或数据库。
 - 安装过程中会短暂出现 `.staging-*` 与 `.trash-*` 目录；命令结束后会清理。
-- 卸载只删除 `data/extensions/<id>`，不修改 `gateway.yaml` / `secrets.yaml`；
-  插件的 `extensions.<id>.config` 与 `extensions.<id>.<name>` 会保留，需要时手动清理。
-- `asg extensions list` 遇到损坏的安装目录时只把该条标记为错误（JSON 里有 `error` 字段），不会让整条命令失败。
+  插件更新是“替换整个 `data/extensions/<id>`”，因此**可写数据必须放在
+  `data/extension-data/<id>`**，否则更新会丢数据。
+- `data/extension-data/<id>` 与插件安装目录分离：更新/重装插件不会删除它；
+  `asg extensions remove <id>` 默认会删除它，`--keep-data` 保留。
+- `data/backends` 是旧安装器的目录，只读迁移源：setup 可以读取、复制到
+  `data/extension-data/<id>/backends/<backend-id>`，但**不能写入或删除**；CLI 与迁移脚本
+  也不会删除它。
+- `asg extensions list` 遇到损坏的安装目录时只把该条标记为错误（JSON 里有 `error`
+  字段），不会让整条命令失败；`backends.json` 损坏只告警并按“未安装”展示。
 
 `bilibili`、`weibo`、`cnki` 是官方插件 id：核心不再内置对应实现，需通过
-`asg extensions install` 安装官方插件仓库；安装后由扩展机制加载。
+`asg extensions install` 安装官方插件仓库；安装后由扩展机制加载。它们与其他插件一样
+使用本文的 manifest、setup 与数据布局。
 
 ## 2. manifest：`asg-plugin.json`
 
@@ -27,26 +48,75 @@
 | `id` | 是 | 3–64 位小写字母/数字/`.` `_` `-`，首尾必须是字母或数字；安装目录名必须与它一致 |
 | `name` | 是 | 1–80 个字符的显示名 |
 | `version` | 是 | 语义化版本，如 `1.2.3`、`1.2.3-beta.1`；必须与 Release tag 去掉 `v` 后一致 |
-| `api_version` | 是 | 当前只接受字面量 `1` |
+| `api_version` | 是 | 只接受 `1` 或 `2` |
 | `provides` | 是 | 非空数组，元素只能是 `"search"` / `"fetch"`，不能重复 |
 | `entry` | 是 | 单个 `.mjs` / `.js` 文件名；不能含 `/`、`\`、`..`，不能是绝对路径 |
 | `platform` | 否 | 小写字母/数字/`-`；作为 fetch 插件的平台回退，缺省用 `id` |
 | `description` | 否 | 任意字符串 |
+| `backends` | 否 | 后端声明数组；**非空时必须 `api_version: 2`**，见 2.1 |
 | `config_schema` | 否 | 插件私有配置的声明（JSON Schema 子集，见第 4 节）；省略时旧行为不变 |
 
-示例：
+未知字段（包括 `backends[]` 里的未知字段）会直接让 manifest 校验失败，不会静默忽略。
+`api_version: 1` 的插件**不能声明非空 `backends`**，否则报“声明 backends 需要
+api_version: 2”；`"backends": []` 等价于未声明。
+
+### 2.1 `backends` 字段
+
+`backends` 只描述后端身份与旧名，不承载代码、安装命令或版本；真正安装哪个版本、
+装到哪里、如何校验由插件入口的 `setup(ctx)` 决定（见第 5 节）。
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `id` | 是 | 3–64 位小写字母/数字/`.` `_` `-`，首尾必须是字母或数字；同一插件内不能重复 |
+| `name` | 是 | 1–80 个字符的显示名 |
+| `description` | 否 | 任意字符串 |
+| `aliases` | 否 | 旧 `asg plugins` 输入名数组；元素非空且不能重复 |
+
+`aliases` 用于兼容历史安装名/通道名：`asg plugins install <name>` /
+`remove <name>` 会先按 `backend.id` 或 `aliases` 精确匹配已安装 manifest，
+命中后转成对同一后端的 `setup` 调用。它不是新插件的安装命令，新插件请直接声明
+稳定的 `backend.id`。
+
+只有 `api_version: 2` 的示例（中性名称）：
 
 ```json
 {
-  "id": "example-fetch",
-  "name": "Example Fetch Plugin",
+  "id": "example-plugin",
+  "name": "Example Plugin",
   "version": "0.1.0",
-  "api_version": 1,
+  "api_version": 2,
   "provides": ["fetch"],
   "entry": "index.mjs",
-  "description": "示例：接管 example.com 的抓取"
+  "description": "示例：插件自己安装 example-api 与 example-cli",
+  "backends": [
+    {
+      "id": "example-api",
+      "name": "Example API",
+      "description": "示例 HTTP 服务",
+      "aliases": ["example-service"]
+    },
+    {
+      "id": "example-cli",
+      "name": "Example CLI",
+      "description": "示例命令行工具"
+    }
+  ]
 }
 ```
+
+声明了 `backends` 的插件应在同一个入口文件里导出 `setup`（见第 5 节）。只声明
+`backends` 而不导出 `setup` 时，安装仍可完成，但自动 setup 会失败；可先用
+`--no-setup` 安装，修好后再运行 `asg extensions setup <id>`。
+
+### 2.2 `api_version` 1 / 2
+
+| 版本 | 能力 |
+| --- | --- |
+| `1` | 身份、能力、入口、私有配置；不能声明 `backends` |
+| `2` | 在 1 的基础上允许声明 `backends`；运行时加载行为不变 |
+
+加载层不消费 `backends`。`api_version: 2` 不会改变 `provides`、入口导出或运行时上下文；
+后端只由 CLI 的 setup 流程使用。
 
 ## 3. `provides` 的语义
 
@@ -59,6 +129,9 @@
 `provides` 同时决定运行时校验：`fetch` 必须导出带 `match` / `fetch` 函数的对象，
 `search` 必须导出带 `id` / `group` / `name` / `runtime` 的对象。导出缺失或类型不符时，
 该插件会被跳过并在日志中告警，不影响其它插件与内置实现。
+
+`setup` 是**独立于 `provides` 的第三个可选导出**：只在 CLI 安装/更新/卸载插件时由
+setup worker 读取，网关运行时不调用它，也不因缺少它而影响 `search` / `fetch` 加载。
 
 ## 4. 插件私有配置（`config_schema`）
 
@@ -109,6 +182,7 @@ extensions:
 - 键是 **manifest 的 `id`**（安装目录名），不是 `gateway.search:weibo` 这类 engineId。
 - 默认值只在运行期补齐，不写回 `gateway.yaml`；`asg extensions config` 也只落盘用户显式设置的值。
 - 读取完整配置（含默认值）：`asg extensions config example-fetch`。
+- 插件也可以在 setup 里通过 `ctx.config` 读写同一段配置；规则见 5.7。
 
 ### 4.3 支持的 JSON Schema 子集
 
@@ -132,6 +206,7 @@ extensions:
 - 配置不合法时不会 `import` 插件入口模块。
 - `asg extensions config` 写前用同一套 schema 校验；失败返回 `CONFIG_INVALID`，
   **不写文件、不重启**，目标文件保持原样。
+- setup 的 `ctx.config.patch` / `replace` / `unset` 同样按 schema 校验；失败不落盘。
 - 读取时补默认值；`--set` / `--unset` / `--file` 写入的始终是原始用户值，默认值不落盘。
 
 ### 4.5 运行期上下文
@@ -166,6 +241,8 @@ extensions:
 - `asg extensions secret <id> --name <name> --stdin` 写新键；
   `asg engines secret <engine> --name <name> --stdin` 仍按 engineId 写旧键。
 - 密钥**不放** `config` / `gateway.yaml`；`config_schema` 只描述非敏感配置。
+- setup 没有写密钥的 API；需要密钥的后端由用户在启动网关的环境里提供（环境变量等），
+  或由插件在 setup 中提示用户执行 `asg extensions secret`。
 
 ### 4.7 字段命名规范
 
@@ -197,14 +274,289 @@ extensions:
 - 每个 object 层级显式或隐式 `additionalProperties: false`；
 - 同一语义只用一个名字，避免 `timeout` / `timeout_ms` 并存。
 
-## 5. 发布资产
+## 5. setup 钩子：插件自管后端
 
-一个插件 Release（推荐 tag 为 `v<version>`，例如 `v0.1.0`；安装器也兼容不带 `v` 的 tag）至少包含三个资产：
+插件入口可以额外导出一个 `setup` 函数：
+
+```ts
+export async function setup(ctx) {
+  // 安装/更新/查看/卸载后端
+}
+```
+
+CLI 在以下时机启动独立子进程执行它：
+
+| 命令 | action |
+| --- | --- |
+| `asg extensions install ...`（默认） | `install` |
+| `asg extensions setup <id>` | `install` |
+| `asg extensions setup <id> --status` | `status` |
+| `asg extensions setup <id> --uninstall` | `uninstall` |
+| `asg extensions remove <id>`（默认，先卸载后端） | `uninstall` |
+| `asg plugins install/remove <name>`（命中 manifest backend 时） | `install` / `uninstall` |
+
+`update` 是契约预留的 action：插件应像 `install` 一样幂等处理，但当前 CLI 不会主动传
+`update`（升级插件仓库时传的是 `install`）。不要依赖某个 action 只出现一次。
+
+### 5.1 上下文
+
+```ts
+interface SetupContext {
+  readonly action: "install" | "update" | "uninstall" | "status";
+  readonly backends: string[];          // 本次选中的 backend id
+  readonly plugin: { id: string; name: string; version: string };
+  readonly host: { os: "linux" | "darwin" | "win32"; arch: string };
+  readonly paths: SetupPaths;
+
+  log(message: string): void;
+  progress(phase: string, detail?: string): void;
+
+  exists(target: string): Promise<boolean>;
+  mkdir(target: string, options?: { recursive?: boolean; mode?: number }): Promise<void>;
+  remove(target: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  copy(from: string, to: string): Promise<void>;
+  readFile(file: string, options?: { encoding?: "utf8" | "base64" }): Promise<string>;
+  writeFile(
+    file: string,
+    content: string | Uint8Array,
+    options?: { mode?: number; append?: boolean },
+  ): Promise<void>;
+  sha256(file: string): Promise<string>;
+  extract(
+    archive: string,
+    dest: string,
+    options?: { stripComponents?: number },
+  ): Promise<void>;
+
+  download(
+    url: string,
+    dest: string,
+    options?: { sha256?: string; headers?: Record<string, string>; label?: string },
+  ): Promise<void>;
+  fetchText(url: string, options?: { headers?: Record<string, string>; label?: string }): Promise<string>;
+  fetchJson<T = unknown>(
+    url: string,
+    options?: { headers?: Record<string, string>; label?: string },
+  ): Promise<T>;
+
+  run(
+    command: string,
+    args?: readonly string[],
+    options?: {
+      cwd?: string;
+      env?: Record<string, string | undefined>;
+      timeoutMs?: number;
+      shell?: boolean;
+    },
+  ): Promise<{
+    code: number | null;
+    signal: string | null;
+    stdout: string;
+    stderr: string;
+    timedOut?: boolean;
+  }>;
+
+  readonly config: {
+    get(): Promise<Record<string, unknown>>;
+    patch(value: Record<string, unknown>): Promise<Record<string, unknown>>;
+    replace(value: Record<string, unknown>): Promise<Record<string, unknown>>;
+    unset(paths: string[]): Promise<Record<string, unknown>>;
+  };
+  readonly state: {
+    read(): Promise<unknown>;
+    write(value: unknown): Promise<void>;
+  };
+  readonly backendState: {
+    read(id: string): Promise<unknown>;
+    write(id: string, state: unknown): Promise<void>;
+    clear(id: string): Promise<void>;
+  };
+}
+```
+
+`host` 刻意只有 `os` / `arch`，没有 `isWindows` 之类的派生字段；平台判断请用
+`ctx.host.os`。`plugin` 与 `host` 是只读快照。
+
+### 5.2 路径
+
+| 字段 | 值 |
+| --- | --- |
+| `paths.root` | 安装根 |
+| `paths.pluginDir` | `data/extensions/<id>`，只读 |
+| `paths.dataDir` | `data/extension-data/<id>`，插件唯一可写数据目录 |
+| `paths.backendDir(id)` | `data/extension-data/<id>/backends/<id>` |
+| `paths.tempDir` | `data/extension-data/<id>/tmp` |
+| `paths.legacyBackendDir(id)` | `data/backends/<旧目录名>`，只读迁移源 |
+| `paths.config` | `<root>/gateway.yaml` |
+| `paths.secrets` | `<root>/secrets.yaml` |
+
+- 相对路径按 `paths.dataDir` 解析；写操作（`mkdir` / `remove` / `rename` / `writeFile` /
+  `extract` / 下载目标 / `copy` 目标）只能落在 `dataDir` 或 `tempDir` 内，
+  且会检查真实路径，符号链接逃逸会被拒绝。`rename` 的源路径也必须是可写路径。
+- `pluginDir` 只能读，不能写；`paths.legacyBackendDir(id)` 只用于读取旧目录。
+- `legacyBackendDir` 的旧目录名可以由宿主提供的映射决定（兼容历史目录名）；
+  当前 CLI 调用不提供映射，通常按 `backend.id` 解析。插件不要假设它一定等于
+  `backend.id`，直接用这个函数取路径。
+
+### 5.3 文件与下载
+
+- `readFile` 默认 `utf8`，二进制用 `base64`；`writeFile` 接受字符串或 `Uint8Array`，
+  会自动创建父目录，支持 `mode` / `append`。
+- `mkdir` 默认 `recursive: true`；`remove` 默认 `recursive: true, force: true`。
+- `sha256` 返回小写十六进制。
+- `download` / `fetchText` / `fetchJson` **只接受 https**。`download` 提供 `sha256` 时，
+  下载后会校验；不匹配会删除目标文件并报错。`fetchText` / `fetchJson` 也会先落临时文件再读取。
+- `extract` 支持 `.tar.gz` / `.tgz` / `.zip`。`stripComponents` 只支持 tar；
+  zip 会优先用 `unzip`，不可用时回退 `tar -xf`。
+- `fetchJson` 返回值是 JSON 解析后的任意值，不是字符串。
+
+### 5.4 运行子进程
+
+```ts
+const result = await ctx.run("example-cli", ["--version"], {
+  cwd: ctx.paths.backendDir("example-cli"),
+  timeoutMs: 120_000,
+});
+if (result.code !== 0) {
+  throw new Error(`example-cli 安装失败：${result.stderr || result.stdout}`);
+}
+```
+
+- `cwd` 按 `paths.dataDir` 解析，必须已经存在且是目录。
+- `env` 与 `process.env` 合并；值设为 `undefined` 表示删除该变量。
+- `timeoutMs` 默认 `600000`（10 分钟）；`0` 表示不限时。超时会先 `SIGTERM`，
+  1.5 秒后 `SIGKILL`，返回 `timedOut: true`。
+- `shell` 默认 `false`；只有确实需要 shell 解析时才设为 `true`。
+- stdout / stderr 各最多保留 4 MiB，超过会截断并追加提示；插件应尽量输出简短日志。
+
+### 5.5 配置写入
+
+`ctx.config` 只操作 `gateway.yaml → extensions.<plugin.id>.config`：
+
+- `get()`：读取当前值；缺省返回 `{}`。`gateway.yaml` 不存在会报错。
+- `patch(value)`：递归合并（对象合并，数组/标量替换），返回合并后的完整配置。
+- `replace(value)`：整体替换。
+- `unset(paths)`：按点号路径删除，例如 `["retry.times"]`；空的父对象会被清理。
+- 每次写入前都会用 manifest 的 `config_schema` 校验；校验失败会抛错，**不落盘**。
+- 写入使用 YAML Document + 原子替换，尽量保留注释；不会写其他插件或顶层的配置。
+- 没有 `config_schema` 时只要求值是对象。
+- **不能**通过 `ctx.config` 写密钥；密钥仍走 `secrets.yaml`。
+
+### 5.6 状态文件
+
+- `ctx.state.read()` / `write(value)` 操作 `data/extension-data/<id>/state.json`；
+  文件不存在时 `read()` 返回 `null`，`write()` 使用原子写。
+- `ctx.backendState.read(id)` / `write(id, state)` / `clear(id)` 操作
+  `data/extension-data/<id>/backends.json` 中按 backend id 索引的记录；
+  `read` 缺省返回 `null`，`clear` 对不存在的 id 是空操作。
+- `asg extensions list` 与 `asg plugins list` 只读 `backends.json` 与后端目录是否存在，
+  不会执行插件代码。建议写入 `{ installed: true, enabled: true, version, path }` 这类字段；
+  状态缺失时若 `data/extension-data/<id>/backends/<backend-id>/` 存在，仍按已安装展示；
+  形状不合法时按未安装展示。
+- `state` / `backendState` 的值必须是可 JSON 序列化的数据，`undefined` 会被拒绝。
+
+### 5.7 幂等、可重跑与旧目录迁移
+
+插件作者必须假设 setup 会被反复执行：
+
+- `install` / `update` / `status` / `uninstall` 都要能在任意当前状态下重跑；
+  已满足条件时直接返回，不要重复下载或重复改配置。
+- 安装前先检查目标目录/版本；下载到 `tempDir`，校验后 `rename` 到最终位置；
+  失败时不要留下半个可用目录。
+- `uninstall` 只删自己安装在 `backendDir(id)` 下的内容，不要把整个
+  `data/extension-data/<id>` 或 `data/backends` 删掉；用户数据是否保留由 CLI 决定。
+- 兼容旧后端时，`data/backends/<name>` 是**只读迁移源**：只复制到新目录，
+  不移动、不改写、不删除。重复执行时“目标已存在”应视为成功或按版本升级。
+
+一个中性的最小示例（`example-plugin`，后端 `example-cli`）：
+
+```ts
+import path from "node:path";
+
+export async function setup(ctx) {
+  const id = "example-cli";
+  const target = ctx.paths.backendDir(id);
+  const legacy = ctx.paths.legacyBackendDir(id);
+
+  if (ctx.action === "status") {
+    const installed = await ctx.exists(target);
+    if (!installed) return { installed: false };
+    const state = await ctx.backendState.read(id);
+    ctx.log(`example-cli 已安装：${target}`);
+    return { installed: true, state };
+  }
+
+  if (ctx.action === "uninstall") {
+    await ctx.remove(target, { recursive: true, force: true });
+    await ctx.backendState.clear(id);
+    ctx.log("example-cli 已卸载");
+    return { removed: true };
+  }
+
+  // install / update：已经装好就直接复用。
+  if (await ctx.exists(path.join(target, "example-cli"))) {
+    ctx.log("example-cli 已存在，跳过安装");
+    return { installed: true, reused: true };
+  }
+
+  await ctx.mkdir(target, { recursive: true });
+
+  // 0.3.x 旧目录只读复制，不移动、不删除。
+  if ((await ctx.exists(legacy)) && !(await ctx.exists(path.join(target, "example-cli")))) {
+    await ctx.copy(legacy, target);
+    ctx.log(`已从旧目录复制 example-cli：${legacy}`);
+  }
+
+  if (!(await ctx.exists(path.join(target, "example-cli")))) {
+    const archive = path.join(ctx.paths.tempDir, "example-cli.tar.gz");
+    await ctx.download("https://example.com/releases/example-cli.tar.gz", archive, {
+      sha256: "<64 位十六进制 sha256>",
+      label: "example-cli",
+    });
+    await ctx.extract(archive, target, { stripComponents: 1 });
+    await ctx.remove(archive, { force: true });
+  }
+
+  const version = await ctx.run(path.join(target, "example-cli"), ["--version"], {
+    cwd: target,
+  });
+  if (version.code !== 0) {
+    throw new Error(`example-cli 校验失败：${version.stderr || version.stdout}`);
+  }
+
+  await ctx.backendState.write(id, {
+    installed: true,
+    enabled: true,
+    version: version.stdout.trim(),
+    path: target,
+  });
+  return { installed: true, version: version.stdout.trim() };
+}
+```
+
+### 5.8 子进程、超时与安全边界
+
+- setup 在**独立 Node 子进程**中运行，父进程通过 IPC 提供文件/网络/进程/配置能力；
+  worker 动态 import 插件入口并调用 `setup`。
+- 整次 setup 默认超时 **600000ms（10 分钟）**；超时或完成后父进程会杀掉子进程。
+  插件应在自己的 `run` 里设置更细的超时，避免整次 setup 被拖死。
+- `setup` 的返回值会经过 `JSON.stringify` 处理：`undefined` 转成 `null`，函数属性会被
+  丢弃；循环引用、BigInt 等无法序列化的值会报错。
+- 子进程只是崩溃隔离/超时/日志转发，**不是安全沙箱**。插件代码仍能使用 Node 内置能力，
+  文件与网络限制只是宿主 API 的防误用边界，不是权限隔离。只安装可信来源。
+- 插件不得 import 网关内部模块，也不得依赖宿主 `node_modules` 中的非内置包；
+  需要第三方库时 bundle 进入口文件。
+
+## 6. 发布资产
+
+一个插件 Release（推荐 tag 为 `v<version>`，例如 `v0.1.0`；安装器也兼容不带 `v` 的 tag）
+至少包含三个资产：
 
 | 资产 | 必填 | 说明 |
 | --- | --- | --- |
 | `asg-plugin.json` | 是 | manifest 本体 |
-| `index.mjs`（或 manifest `entry` 指定的文件名） | 是 | 单文件 ESM 产物；不能依赖同目录其它文件 |
+| `index.mjs`（或 manifest `entry` 指定的文件名） | 是 | 单文件 ESM 产物；不能依赖同目录其它文件；可同时导出 `fetch` / `engine` / `setup` |
 | `SHA256SUMS` | 是 | `sha256sum` 格式，必须覆盖 manifest 与 entry |
 
 生成并发布示例：
@@ -223,6 +575,8 @@ gh release create v0.1.0 index.mjs asg-plugin.json SHA256SUMS
 3. 再下载 `entry` 与 `SHA256SUMS`。
 4. 用 `SHA256SUMS` 校验 manifest 与 entry；缺失或不匹配立即失败并清理 staging。
 5. 旧目录移到 `.trash-*`，staging 原子换到 `data/extensions/<id>/`；失败时回滚旧目录。
+6. 安装成功后，如 manifest 声明了 `backends` 且没有 `--no-setup`，执行一次
+   `setup(ctx)`（action=`install`，默认覆盖全部后端）。
 
 所有下载地址只接受 **https**。下载复用 `scripts/install/http.mjs`，因此会自动遵循
 `HTTPS_PROXY` / `https_proxy` 等代理变量。
@@ -230,21 +584,77 @@ gh release create v0.1.0 index.mjs asg-plugin.json SHA256SUMS
 限制：私有仓库的 Release 资产目前按 `browser_download_url` 下载，不会额外带
 GitHub Release asset API 的鉴权；私有仓库安装暂不保证可用。
 
-## 6. CLI
+## 7. CLI
 
 ```text
 asg extensions search [query] [--limit N]
-asg extensions install <owner/repo>[@version]
+asg extensions install <owner/repo>[@version] [--backend <id>]... [--no-setup]
+asg extensions setup <id> [--backend <id>]... [--status] [--uninstall]
 asg extensions list
-asg extensions remove <id>
+asg extensions remove <id> [--keep-data] [--force]
 asg extensions config <id> [--get [key]] [--set key=value]... [--unset key]... [--file <path>] [--describe]
 asg extensions secret <id> --name <name> --stdin | --clear
 ```
 
-- `search`：搜索 GitHub 上带 `topic:asg-plugin` 的公开仓库；默认按更新时间倒序。
-- `install`：从 `owner/repo` 的 GitHub Release 安装；`@version` 可锁定版本。
-- `list`：表格输出 `ID / VERSION / PROVIDES / ENTRY`；JSON 模式返回 `{ "extensions": [...] }`。
-- `remove`：删除 `data/extensions/<id>`。
+### 7.1 `install`
+
+- 从 `owner/repo` 的 GitHub Release 安装；`@version` 可锁定版本。
+- `--backend <id>` 可重复，用来只 setup 部分后端；给未声明后端的插件传 `--backend`，
+  或 id 不在 manifest 中，会报 `CONFIG_INVALID`（退出码 4）。
+- 默认对 manifest 声明的**全部后端**执行 `action=install`；`--no-setup` 只跳过执行，
+  仍会报告后端列表。
+- setup 失败时命令返回 `PLUGIN_FAILED`（退出码 1），但**插件目录保留**；修复后可运行
+  `asg extensions setup <id>` 重试。
+- 安装完成不会自动重启网关。
+
+人类输出示例：
+
+```text
+已安装 Example Plugin (example-plugin) v0.1.0
+能力: fetch
+后端: example-api, example-cli
+路径: /path/to/root/data/extensions/example-plugin
+setup: 已完成（action=install，后端 example-api, example-cli）
+重启网关后生效。
+```
+
+JSON（`--json`）的 `data` 包含安装结果、`backends`（manifest 声明的全部 id）与
+`setup` 报告；`setup.backends` 是本次实际执行的后端。
+
+### 7.2 `setup`
+
+- 对已安装插件单独执行 setup；默认 `action=install`。
+- `--status` 切到 `status`，`--uninstall` 切到 `uninstall`，两者互斥。
+- `--backend <id>` 可重复；未给时使用 manifest 声明的全部后端。
+- 插件没有声明后端时直接报 `CONFIG_INVALID`（退出码 4），不启动子进程。
+- 失败返回 `PLUGIN_FAILED`（退出码 1）；成功也不会自动重启网关。
+- action 的语义由插件定义；推荐 `status` 只读并返回可读状态，`uninstall` 只删后端。
+
+### 7.3 `list`
+
+表格列固定为 `ID / VERSION / PROVIDES / BACKENDS / ENTRY`。
+
+- `BACKENDS` 每个后端渲染为 `<id>@<version>`（`backends.json` 有版本时）、
+  `<id>`（已安装但无版本）或 `<id>(未安装)`；没有声明后端时显示 `-`。
+- 读取 `data/extension-data/<id>/backends.json`，**不执行任何插件代码**。
+- 状态文件缺失按“未安装”处理；损坏时在 stderr/`reporter.info` 告警，列表仍可用。
+- JSON 返回 `{ "extensions": [...] }`；每个后端条目包含 manifest 的
+  `id` / `name` / `description` / `aliases`，并附加
+  `installed` / `enabled`，有值时附加 `version` / `path`。
+
+### 7.4 `remove`
+
+- 默认先对全部已声明后端执行 `action=uninstall`；成功后才删除插件目录。
+  卸载 setup 失败时不删除插件，返回 `PLUGIN_FAILED`。
+- `--force` 跳过卸载 setup，直接删除插件目录；manifest 损坏时也用它跳过。
+- 插件目录删除后，默认删除 `data/extension-data/<id>`；`--keep-data` 保留。
+- 不修改 `gateway.yaml` / `secrets.yaml`；`extensions.<id>.config` 与密钥会保留，
+  需要时手动清理。
+- 不会删除 `data/backends`（旧目录）。
+- 不自动重启网关。
+
+### 7.5 `config` / `secret`
+
 - `config`：读写 `gateway.yaml → extensions.<id>.config`。
   - 无参数：输出补齐默认值后的完整配置；
   - `--get [key]`：只输出一个字段（支持 `retry.times` 这类点号路径）；不给 key 时输出整份配置；
@@ -254,40 +664,39 @@ asg extensions secret <id> --name <name> --stdin | --clear
   - `--describe`：列出 schema 的顶层字段（类型、必填、默认值、说明）。
 - `secret`：写/删 `secrets.yaml → extensions.<id>.<name>`。值只从 stdin 读，
   末尾一个换行会被去掉；`--clear` 删除；输出不回显明文。
+- 两者都是**先整体校验、再写一次文件、最后整栈重启一次**；校验失败不落盘、不重启。
+  `secret` 写入的 `secrets.yaml` 权限固定为 `0600`。
 
-示例：
+### 7.6 `asg plugins`（已弃用）
 
-```bash
-asg extensions search bilibili
-asg extensions install someone/asg-plugin-example@0.1.0
-asg extensions list
-asg extensions list --json
-asg extensions remove example-fetch
+`asg plugins list|install|remove` 保留为兼容 facade，帮助文本会提示改用
+`asg extensions install/setup/remove`。行为：
 
-asg extensions config example-fetch
-asg extensions config example-fetch --describe
-asg extensions config example-fetch --get timeout_ms
-asg extensions config example-fetch --set timeout_ms=20000 --set user_agent=asg-example
-asg extensions config example-fetch --unset user_agent
+1. **先解析 manifest**：在 `data/extensions/*/asg-plugin.json` 的
+   `backends[]` 中按 `backend.id` 或 `aliases` 精确匹配；命中后调用该插件的
+   setup（`install` / `uninstall`），成功后整栈重启。
+2. **未命中回退旧安装器**：调用 `scripts/backends/cli.mjs <name> <action> --root <ROOT> --json`，
+   名字原样透传，成功后整栈重启。
+3. 两者都没有：`PLUGIN_UNKNOWN`（退出码 4），提示用 `asg extensions install`。
+4. `list` 先列 manifest 后端（`name` 取 `aliases[0]` 或 `backend.id`），
+   再补上 `data/backends/*` 中未被 manifest 覆盖的旧安装。P1 的 `platform` /
+   `channel` / `channel_id` 字段保留但为空字符串。
 
-echo "$EXAMPLE_API_KEY" | asg extensions secret example-fetch --name api_key --stdin
-asg extensions secret example-fetch --name api_key --clear
-```
+新插件不要依赖 `asg plugins`；它只是 0.3.x 的过渡入口。
 
-所有子命令都支持全局 `--json`（输出单个 result 对象）；`config` / `secret` 的 JSON 字段见
-`docs/cli-contract.md` 5.6.1。
+### 7.7 重启矩阵
 
-`config` 没有声明 `config_schema` 时按原样透传，`--describe` 会提示未声明。
-所有写入命令都是**先整体校验、再写一次文件、最后整栈重启一次**；校验失败不落盘、不重启。
-`secret` 写入的 `secrets.yaml` 权限固定为 `0600`。
+| 命令 | 自动重启 |
+| --- | --- |
+| `extensions install` / `setup` / `remove` | 否，重启网关后生效 |
+| `extensions config` / `secret` | 是，整栈重启一次 |
+| `plugins install` / `remove` | 是（保持旧行为） |
+| `plugins list` | 否，只读 |
 
-安装成功后人类输出会明确提示：
+所有子命令都支持全局 `--json`（输出单个 result 对象）；`config` / `secret` 的 JSON 字段
+见 `docs/cli-contract.md` 5.6.1。
 
-```text
-重启网关后生效。
-```
-
-### GitHub API 限流
+### 7.8 GitHub API 限流
 
 `search` 以及私有仓库的 Release 查询会读取 `GITHUB_TOKEN`（或 `GH_TOKEN`）。
 未设置 token 时 GitHub 对匿名请求限制较严；遇到 403 / 429 时请设置 token 后重试：
@@ -300,30 +709,38 @@ export GITHUB_TOKEN=ghp_xxx
 `X-GitHub-Api-Version: 2022-11-28`、`User-Agent: asg/<version>`；有 token 时加
 `Authorization: Bearer <token>`。
 
-## 7. 安全与边界
+## 8. 安全与边界
 
-- manifest 的 `id` 与 `entry` 都做了路径约束，安装目录不会逃出 `data/extensions/`。
-- 只接受 https 资产地址，并用 `SHA256SUMS` 校验 manifest 与 entry。
+- manifest 的 `id`、`backends[].id` 与 `entry` 都做了路径约束，安装目录不会逃出
+  `data/extensions/`；setup 的写操作被限制在插件自己的 `data/extension-data/<id>`。
+- 只接受 https 资产地址，并用 `SHA256SUMS` 校验 manifest 与 entry；setup 下载同样只允许 https，
+  推荐始终提供 `sha256`。
 - 官方 id（`bilibili` / `weibo` / `cnki`）与普通第三方 id 一样安装/卸载。
 - 插件代码在网关进程内 import，**没有沙箱**；可读取宿主注入的
   `ctx.pluginConfig` / `ctx.pluginSecrets`（内置实现另用 `ctx.settings` / `ctx.secrets` / `getSecret()`）。
   只安装可信来源。
+- setup 在独立子进程中运行，但同样**不是安全沙箱**；它继承用户权限，可执行任意命令。
+  宿主只限制通过 `ctx` API 的写入路径，不限制插件直接使用 Node 能力。
+- `data/backends` 是旧安装目录：通过 `ctx` API 只能读/复制，不能写入；CLI 不会主动删除。
+  但 setup 子进程不是沙箱，插件不应绕过 `ctx` 去改旧目录。
 - `config_schema` / `extensions.<id>.config` **不放密钥**；密钥一律写
   `secrets.yaml → extensions.<id>.<name>`，用 `asg extensions secret --stdin` 输入，
   不进 argv、不回显。
 
-## 8. 运行时加载
+## 9. 运行时加载
 
 网关启动时（`createServer` 首次调用，进程级只执行一次）以及 `asg engines list|enable|disable|route|secret`
 会扫描 `data/extensions`：
 
-1. 读取 `data/extensions/<id>/asg-plugin.json`，校验 `api_version === 1`，目录名必须等于 `manifest.id`；
-   `config_schema` 也会在这一步校验定义本身。
+1. 读取 `data/extensions/<id>/asg-plugin.json`，校验 `api_version` 为 `1` 或 `2`，
+   目录名必须等于 `manifest.id`；`config_schema` 也会在这一步校验定义本身。
+   `backends` 只做 manifest 校验，加载层不消费。
 2. 按 manifest id 读取 `gateway.yaml → extensions.<manifest id>.config`，用 `config_schema`
    校验并补默认值；非法配置直接跳过该插件（不 import 入口）。
 3. 解析 `secrets.yaml → extensions.<id>.<name>`（同时合并旧 `extensions.<engineId>.<name>`，
    manifest id 优先），解析 `env:NAME`，空值不注入。
 4. `import()` 安装目录内 `entry` 指向的文件（单个 ESM 文件，不得引用其它插件文件）。
+   `setup` 导出不会在加载阶段执行。
 5. 按 `provides` 读取命名导出：
    - `fetch`：抓取插件对象（`match` / `enabled` / `available` / `fetch`），manifest 覆盖 `id` / `name` / `displayName` / `platform`；
    - `engine`：搜索源对象（`id` / `group` / `name` / `runtime` 等）。
@@ -359,3 +776,20 @@ asg extensions secret weibo --name cookie --stdin
 需要跨进程能力时应通过 CLI / HTTP 自行实现。
 
 插件模板见 `examples/asg-plugin/`，发布时请给仓库加 `asg-plugin` topic。
+
+## 10. 迁移与兼容（0.3.x → 0.4.x）
+
+- **旧后端目录**：0.3.x 的插件后端在 `data/backends/<name>`。新契约下它只是只读迁移源；
+  setup 应把需要的内容复制到 `data/extension-data/<id>/backends/<backend-id>`，
+  不移动、不删除。旧目录可以长期保留，不影响新布局。
+- **旧 CLI 名称**：`asg plugins install/remove <name>` 仍可用。命中已安装 manifest 的
+  `backends[].id` / `aliases` 时走新 setup；未命中才回退旧安装器。
+- **临时迁移脚本**：`scripts/migrations/0.3.x.mjs` 在 0.3.x 期间按
+  `preflight → plugins → backends → config → restart` 执行；`config` 阶段在 P1 是占位，
+  只标记 skipped，P2 才迁移旧配置键/密钥；0.4.x 起删除整个目录。
+  细节见 `scripts/migrations/README.md`。
+- **阶段边界**：本文只描述已实现的安装/setup/CLI 契约。P1 不迁移旧配置，也不执行
+  0.4.x 的清理；不要把迁移脚本的占位阶段当作已完成能力。
+
+相关决策见 `docs/adr/0022-plugin-owned-backends-and-setup-hook.md`；旧的后端安装脚本
+背景见 `docs/adr/0016-backend-install-and-self-update.md`（已由 0022 过渡接管）。

@@ -65,8 +65,10 @@ describe("插件 manifest", () => {
     expect(isValidExtensionVersion("1.2.3-beta.1")).toBe(true);
   });
 
-  it("api_version 只接受 1", () => {
-    expect(() => parseManifest(manifest({ api_version: 2 }))).toThrow(/api_version/);
+  it("api_version 接受 1 或 2", () => {
+    expect(parseManifest(manifest()).api_version).toBe(1);
+    expect(parseManifest(manifest({ api_version: 2 })).api_version).toBe(2);
+    expect(() => parseManifest(manifest({ api_version: 3 }))).toThrow(/api_version/);
     expect(() => parseManifest(manifest({ api_version: "1" }))).toThrow(/api_version/);
   });
 
@@ -92,6 +94,99 @@ describe("插件 manifest", () => {
     expect(isValidEntryName("index.js")).toBe(true);
     expect(isValidEntryName("x.y.mjs")).toBe(true);
     expect(isValidEntryName("index_mjs.js")).toBe(true);
+  });
+});
+
+describe("插件 manifest 的 backends（api_version 2）", () => {
+  const backend = {
+    id: "demo-api",
+    name: "Demo API",
+    description: "示例后端",
+    aliases: ["demo_old", "demo-old"],
+  };
+
+  it("api_version 2 + 合法 backends 通过并原样保留", () => {
+    const parsed = parseManifest(
+      manifest({ api_version: 2, backends: [backend] }),
+    );
+    expect(parsed.backends).toEqual([backend]);
+  });
+
+  it("没有 backends 时 1 和 2 都通过", () => {
+    expect(parseManifest(manifest())).not.toHaveProperty("backends");
+    expect(parseManifest(manifest({ api_version: 2 }))).not.toHaveProperty("backends");
+  });
+
+  it("api_version 1 不允许声明非空 backends", () => {
+    expect(() => parseManifest(manifest({ backends: [backend] }))).toThrow(/backends/);
+    expect(() => parseManifest(manifest({ backends: [backend] }))).toThrow(/api_version: 2/);
+    // 空数组不引入任何后端，兼容旧 manifest。
+    expect(parseManifest(manifest({ backends: [] })).backends).toEqual([]);
+  });
+
+  it("backends 不能有重复 id", () => {
+    expect(() =>
+      parseManifest(
+        manifest({
+          api_version: 2,
+          backends: [backend, { id: "demo-api", name: "另一个" }],
+        }),
+      ),
+    ).toThrow(/重复 id/);
+  });
+
+  it("校验 backend id 规则", () => {
+    for (const id of ["ab", "ABC", "-abc", "abc-", ".abc", "a".repeat(65), "中文"]) {
+      expect(
+        () => parseManifest(manifest({ api_version: 2, backends: [{ ...backend, id }] })),
+        id,
+      ).toThrow(/backends\[\]\.id|重复 id/);
+    }
+  });
+
+  it("校验 backend name 长度", () => {
+    expect(() =>
+      parseManifest(manifest({ api_version: 2, backends: [{ id: "demo-api", name: "" }] })),
+    ).toThrow(/backends\[\]\.name/);
+    expect(() =>
+      parseManifest(
+        manifest({ api_version: 2, backends: [{ id: "demo-api", name: "x".repeat(81) }] }),
+      ),
+    ).toThrow(/backends\[\]\.name/);
+  });
+
+  it("aliases 不能包含空串或重复项", () => {
+    expect(() =>
+      parseManifest(
+        manifest({
+          api_version: 2,
+          backends: [{ ...backend, aliases: ["ok", ""] }],
+        }),
+      ),
+    ).toThrow(/aliases/);
+    expect(() =>
+      parseManifest(
+        manifest({
+          api_version: 2,
+          backends: [{ ...backend, aliases: ["same", "same"] }],
+        }),
+      ),
+    ).toThrow(/aliases/);
+  });
+
+  it("backend 元素是严格对象", () => {
+    expect(() =>
+      parseManifest(manifest({ api_version: 2, backends: [{ ...backend, extra: true }] })),
+    ).toThrow(/[Uu]nrecognized|extra/);
+    expect(() => parseManifest(manifest({ api_version: 2, backends: ["demo-api"] }))).toThrow(
+      /backends/,
+    );
+  });
+
+  it("顶层 manifest 的未知字段仍被拒绝", () => {
+    expect(() =>
+      parseManifest(manifest({ api_version: 2, backends: [backend], extra: true })),
+    ).toThrow(/[Uu]nrecognized|extra/);
   });
 });
 

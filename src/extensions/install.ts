@@ -17,12 +17,10 @@ import {
   isValidExtensionId,
   isValidExtensionVersion,
   parseManifest,
+  type ExtensionBackend,
   type ExtensionManifest,
   type ExtensionProvide,
 } from "./manifest.js";
-
-/** 官方插件 id（内置实现已迁出，允许通过扩展机制安装/覆盖）。 */
-export const BUILTIN_EXTENSION_IDS = ["bilibili", "weibo", "cnki"] as const;
 
 const MANIFEST_FILE = "asg-plugin.json";
 const CHECKSUMS_FILE = "SHA256SUMS";
@@ -59,6 +57,8 @@ export interface InstalledExtensionInfo {
   version: string;
   name: string;
   provides: ExtensionProvide[];
+  /** manifest.backends；api_version 1 或未声明时为 []。 */
+  backends: ExtensionBackend[];
   path: string;
 }
 
@@ -67,6 +67,7 @@ export interface InstalledExtension {
   name?: string;
   version?: string;
   provides?: ExtensionProvide[];
+  backends?: ExtensionBackend[];
   entry?: string;
   path: string;
   /** 单个安装目录损坏时只标记该条，不让整条 list 命令失败。 */
@@ -510,6 +511,7 @@ export async function installExtension(
       version: manifest.version,
       name: manifest.name,
       provides: manifest.provides,
+      backends: manifest.backends ?? [],
       path: target,
     };
   } finally {
@@ -568,6 +570,7 @@ export function listExtensions(root: string): InstalledExtension[] {
       name: manifest.name,
       version: manifest.version,
       provides: manifest.provides,
+      backends: manifest.backends ?? [],
       entry: manifest.entry,
       path: dir,
     };

@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- 插件 manifest `api_version: 2` 与 `backends` 声明；入口可选导出 `setup(ctx)`，由插件自行下载、校验、安装所需后端。
+- setup 宿主：独立子进程 + IPC，提供文件、https 下载、SHA256、解压、命令执行、`extensions.<id>.config`、state 与 backendState 能力。
+- 插件数据目录 `data/plugin-data/<id>/`，与 `data/extensions/<id>/` 分离；插件更新不再丢后端。
+- `asg extensions install|setup|remove` 增加后端生命周期：默认安装全部声明后端，支持 `--backend`、`--no-setup`、`--status`、`--uninstall`、`--keep-data`、`--force`。
+- 新增 0.3.x 临时迁移脚本 `scripts/migrations/0.3.x.mjs`：分段 preflight → plugins → backends → config（P1 跳过）→ restart，支持 dry-run、resume、rollback 与 jsonl。
+- 新增 ADR-0022：插件自管后端与 setup 钩子。
+
+### Changed
+
+- `asg plugins` 降级为兼容 facade：只按已安装 manifest 的 `backends[].id` / `legacy_names` 解析，未命中回退旧 `scripts/backends/cli.mjs`；`asg extensions` 成为推荐入口。
+- `asg extensions install/setup/remove` 不自动重启网关；`config` / `secret` 写入仍整栈重启。
+- 插件 `config` 写入在 setup 子进程内同样按 `config_schema` 校验，失败不落盘。
+
 ### Fixed
 
 - 安装器：`$VAR` 紧跟全角括号会被 bash 3.2 吞进变量名并触发 `unbound variable`，统一改为 `${VAR}` 写法。

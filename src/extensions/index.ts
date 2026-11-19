@@ -10,10 +10,9 @@ export {
   isValidExtensionVersion,
   parseManifest,
 } from "./manifest.js";
-export type { ExtensionManifest, ExtensionProvide } from "./manifest.js";
+export type { ExtensionBackend, ExtensionManifest, ExtensionProvide } from "./manifest.js";
 
 export {
-  BUILTIN_EXTENSION_IDS,
   extensionsDir,
   installExtension,
   isValidRepo,

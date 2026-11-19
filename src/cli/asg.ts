@@ -19,8 +19,8 @@ const USAGE = `用法: asg <命令> [选项]
   logs [service...] [-f]      日志；默认合并 gateway + supervisor
   config get|set|validate      gateway.yaml / secrets.yaml
   engines list|enable|disable|route|secret  搜索引擎（searxng + 网关原生源）
-  plugins list|install|remove  外部后端
-  extensions search|install|list|remove  第三方插件
+  plugins list|install|remove  已弃用；请使用 extensions install/setup/remove
+  extensions search|install|setup|list|remove|config|secret  第三方插件
   browser status|install       Playwright 浏览器
   adlist update               广告过滤列表
   update check|apply          自更新

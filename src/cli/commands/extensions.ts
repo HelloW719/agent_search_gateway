@@ -8,13 +8,19 @@
  * 先整体校验一次，再写一次文件，最后整栈重启一次。校验失败不落盘。
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import process from "node:process";
 import { takeFlag, takeNumber, takeValue } from "../args.js";
 import type { CommandFn, CommandResult } from "../context.js";
 import { CliError, EXIT } from "../errors.js";
 import type { Reporter } from "../output.js";
 import { restartForConfig } from "../runtime/stack.js";
+import {
+  backendInstallDir,
+  normalizeBackendState,
+  extensionDataDir,
+  readBackendStates,
+} from "../deps/plugins.js";
 import {
   configPaths,
   deleteYamlPath,
@@ -43,10 +49,17 @@ import {
   loadInstalledManifest,
   removeExtension,
   searchExtensions,
+  type ExtensionBackend,
   type ExtensionManifest,
   type ExtensionSearchItem,
   type InstalledExtension,
 } from "../../extensions/index.js";
+import {
+  runPluginSetup,
+  type RunPluginSetupOptions,
+  type RunPluginSetupResult,
+} from "../../extensions/setup/runner.js";
+import type { SetupAction } from "../../extensions/setup/types.js";
 
 const RESTART_NOTICE = "整栈重启会断开所有 MCP 连接。";
 
@@ -59,25 +72,41 @@ const CONFIG_USAGE =
 const SECRET_USAGE =
   "用法: asg extensions secret <id> --name <name> --stdin | --clear";
 
-const USAGE = `用法: asg extensions <search|install|list|remove|config|secret> ...
+const INSTALL_USAGE =
+  "用法: asg extensions install <owner/repo>[@version] [--backend <id>]... [--no-setup]";
+
+const SETUP_USAGE =
+  "用法: asg extensions setup <id> [--backend <id>]... [--status] [--uninstall]";
+
+const REMOVE_USAGE = "用法: asg extensions remove <id> [--keep-data] [--force]";
+
+const USAGE = `用法: asg extensions <search|install|setup|list|remove|config|secret> ...
 
   search [query] [--limit N]       搜索 topic:asg-plugin 的 GitHub 仓库
-  install <owner/repo>[@version]   下载、校验并安装第三方插件
-  list                             列出已安装的第三方插件
-  remove <id>                      删除 data/extensions/<id>
+  install <owner/repo>[@version] [--backend <id>]... [--no-setup]
+                                   下载、校验并安装第三方插件；默认执行 manifest 声明的全部后端 setup
+  setup <id> [--backend <id>]... [--status] [--uninstall]
+                                   单独执行已安装插件的 setup（默认 action=install）
+  list                             列出已安装的第三方插件与后端状态
+  remove <id> [--keep-data] [--force]
+                                   先执行后端卸载 setup，再删除插件目录
   config <id> [--get [key]] [--set key=value]... [--unset key]... [--file <path>] [--describe]
                                    读写 gateway.yaml → extensions.<id>.config
   secret <id> --name <name> --stdin | --clear
                                    写/删 secrets.yaml → extensions.<id>.<name>
 
-说明：安装后不会自动重启网关，重启服务（或下次运行 asg engines）后生效；
-config / secret 写入后会整栈重启一次。`;
+说明：install/setup/remove 执行插件 setup 后不会自动重启网关；
+重启服务（或下次运行 asg engines）后生效。config / secret 写入后会整栈重启一次。`;
+
+export type SetupRunner = (options: RunPluginSetupOptions) => Promise<RunPluginSetupResult>;
 
 export interface ExtensionsApi {
   install: typeof installExtension;
   list: typeof listExtensions;
   remove: typeof removeExtension;
   search: typeof searchExtensions;
+  loadManifest: typeof loadInstalledManifest;
+  setup: SetupRunner;
 }
 
 const DEFAULT_API: ExtensionsApi = {
@@ -85,6 +114,8 @@ const DEFAULT_API: ExtensionsApi = {
   list: listExtensions,
   remove: removeExtension,
   search: searchExtensions,
+  loadManifest: loadInstalledManifest,
+  setup: runPluginSetup,
 };
 
 let api: ExtensionsApi = DEFAULT_API;
@@ -136,12 +167,64 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function renderList(extensions: InstalledExtension[]): string {
-  const header = ["ID", "VERSION", "PROVIDES", "ENTRY"];
+/** list 输出里的后端条目：manifest 声明 + `backends.json` 中的运行状态（只读文件）。 */
+export interface ListedBackend extends ExtensionBackend {
+  installed: boolean;
+  enabled: boolean;
+  version?: string;
+  path?: string;
+}
+
+export interface ListedExtension extends Omit<InstalledExtension, "backends"> {
+  backends: ListedBackend[];
+}
+
+/** 读取 `data/extension-data/<id>/backends.json`，不执行任何插件代码。 */
+function listExtensionsWithBackends(
+  root: string,
+  reporter: Reporter,
+): ListedExtension[] {
+  return api.list(root).map((extension) => {
+    const { states, warning } = readBackendStates(root, extension.id);
+    if (warning) {
+      reporter.info(`警告: ${extension.id} 的后端状态不可用：${warning}`);
+    }
+
+    const backends = (extension.backends ?? []).map((backend) => {
+      const state = normalizeBackendState(states[backend.id]);
+      // 与 `asg plugins list` 保持一致：状态文件可能缺失/过期，后端目录存在即视为已安装。
+      const dirInstalled = existsSync(backendInstallDir(root, extension.id, backend.id));
+      const entry: ListedBackend = {
+        ...backend,
+        installed: state.installed || dirInstalled,
+        enabled: state.enabled,
+      };
+      if (state.version) entry.version = state.version;
+      if (state.path) entry.path = state.path;
+      return entry;
+    });
+
+    return { ...extension, backends };
+  });
+}
+
+function renderBackends(backends: ListedBackend[]): string {
+  if (backends.length === 0) return "-";
+  return backends
+    .map((backend) => {
+      if (!backend.installed) return `${backend.id}(未安装)`;
+      return backend.version ? `${backend.id}@${backend.version}` : backend.id;
+    })
+    .join(",");
+}
+
+function renderList(extensions: ListedExtension[]): string {
+  const header = ["ID", "VERSION", "PROVIDES", "BACKENDS", "ENTRY"];
   const rows = extensions.map((extension) => [
     extension.id,
     extension.version ?? "-",
     extension.provides && extension.provides.length > 0 ? extension.provides.join(",") : "-",
+    renderBackends(extension.backends),
     extension.entry ?? "-",
   ]);
 
@@ -205,15 +288,133 @@ async function runSearch(args: string[]): Promise<CommandResult> {
   };
 }
 
+function withoutGlobals(args: string[]): string[] {
+  return args.filter((arg) => arg !== "--json" && arg !== "--jsonl");
+}
+
+/** 取出可重复出现的 `--name value` / `--name=value`，保持书写顺序并去重。 */
+function takeRepeated(rest: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < rest.length; ) {
+    const arg = rest[index]!;
+    if (arg === name) {
+      const value = rest[index + 1];
+      if (value === undefined || value.startsWith("-")) usage(`${name} 需要一个后端 id`);
+      values.push(value);
+      rest.splice(index, 2);
+      continue;
+    }
+    if (arg.startsWith(`${name}=`)) {
+      const value = arg.slice(name.length + 1);
+      if (value.length === 0) usage(`${name} 需要一个后端 id`);
+      values.push(value);
+      rest.splice(index, 1);
+      continue;
+    }
+    index += 1;
+  }
+  return [...new Set(values)];
+}
+
+/** 把 --backend 的请求收敛到 manifest 声明的后端；未知 id 报明确错误。 */
+function selectBackends(
+  id: string,
+  declared: ExtensionBackend[],
+  requested: string[],
+): string[] {
+  const ids = declared.map((backend) => backend.id);
+  if (ids.length === 0) {
+    if (requested.length === 0) return [];
+    throw new CliError(
+      "CONFIG_INVALID",
+      EXIT.INVALID,
+      `该插件没有声明后端：${id}（收到 --backend ${requested.join(", ")}）`,
+    );
+  }
+
+  const known = new Set(ids);
+  const unknown = requested.filter((item) => !known.has(item));
+  if (unknown.length > 0) {
+    throw new CliError(
+      "CONFIG_INVALID",
+      EXIT.INVALID,
+      `插件 ${id} 没有声明后端：${unknown.join(", ")}（可用：${ids.join(", ")}）`,
+    );
+  }
+
+  return requested.length > 0 ? requested : ids;
+}
+
+/** `install` 已落盘后才校验 --backend，错误里必须说明插件已经装上了。 */
+function installedBackendHint(installedPath: string, declaredIds: string[]): string {
+  const available = declaredIds.length > 0 ? declaredIds.join(", ") : "（无）";
+  return `插件已安装到 ${installedPath}\n可用后端：${available}`;
+}
+
+interface SetupReport {
+  attempted: boolean;
+  ok: boolean;
+  action: SetupAction;
+  backends: string[];
+  result?: unknown;
+  error?: string;
+}
+
+/** 调用注入的 setup runner；插件身份/入口/schema 全部来自已安装 manifest。 */
+async function runManifestSetup(
+  root: string,
+  reporter: Reporter,
+  manifest: ExtensionManifest,
+  action: SetupAction,
+  backends: string[],
+): Promise<SetupReport> {
+  const outcome = await api.setup({
+    root,
+    entry: manifest.entry,
+    action,
+    plugin: { id: manifest.id, name: manifest.name, version: manifest.version },
+    backends,
+    configSchema: manifest.config_schema,
+    onLog: makeLogger(reporter),
+  });
+
+  const report: SetupReport = {
+    attempted: true,
+    ok: outcome.ok,
+    action,
+    backends,
+  };
+  if (outcome.result !== undefined) report.result = outcome.result;
+  if (outcome.error !== undefined) report.error = outcome.error;
+  return report;
+}
+
+function skippedSetup(action: SetupAction, backends: string[]): SetupReport {
+  return { attempted: false, ok: true, action, backends };
+}
+
+function formatSetupResult(value: unknown): string {
+  if (value === undefined) return "（无返回值）";
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
 async function runInstall(
   root: string,
   reporter: Reporter,
   args: string[],
 ): Promise<CommandResult> {
-  if (args.length !== 1) {
-    throw usageError(`用法: asg extensions install <owner/repo>[@version]`);
+  const noSetup = takeFlag(args, "--no-setup");
+  const requested = takeRepeated(args, "--backend");
+  const positional = withoutGlobals(args);
+  if (positional.length !== 1) {
+    throw usageError(INSTALL_USAGE);
   }
-  const target = args[0]!;
+
+  const target = positional[0]!;
   const { repo, version } = parseInstallTarget(target);
   if (!isValidRepo(repo)) {
     throw usageError(`仓库格式应为 owner/name：${repo}`);
@@ -226,36 +427,254 @@ async function runInstall(
     logger: makeLogger(reporter),
   });
 
+  const declared = result.backends ?? [];
+  const backendIds = declared.map((backend) => backend.id);
+
+  // 安装 API 不返回 manifest，无法在下载前校验 --backend；这里包装错误，
+  // 明确告知插件已落盘以及可用的后端 id。
+  let selected: string[];
+  try {
+    selected = selectBackends(result.id, declared, requested);
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    const wrapped = new CliError(
+      error.code,
+      error.exitCode,
+      `${error.message}\n${installedBackendHint(result.path, backendIds)}`,
+      {
+        plugin_id: result.id,
+        backend_ids: backendIds,
+        requested_backends: requested,
+        path: result.path,
+        error,
+        restarted: false,
+      },
+    );
+    wrapped.cause = error;
+    throw wrapped;
+  }
+
+  let setupReport: SetupReport;
+  if (selected.length === 0) {
+    setupReport = skippedSetup("install", []);
+  } else if (noSetup) {
+    setupReport = skippedSetup("install", selected);
+  } else {
+    const manifest = api.loadManifest(root, result.id);
+    setupReport = await runManifestSetup(root, reporter, manifest, "install", selected);
+    if (!setupReport.ok) {
+      throw new CliError(
+        "PLUGIN_FAILED",
+        EXIT.FAIL,
+        `插件 ${result.id} 的后端 setup 失败：${setupReport.error ?? "未知错误"}\n` +
+          `插件已保留在 ${result.path}；可运行 \`asg extensions setup ${result.id}\` 重试。`,
+        {
+          plugin_id: result.id,
+          backend_ids: backendIds,
+          backends: selected,
+          path: result.path,
+          error: setupReport.error,
+          restarted: false,
+        },
+      );
+    }
+  }
+
+  const setupLine = setupReport.attempted
+    ? `setup: 已完成（action=install，后端 ${setupReport.backends.join(", ")}）`
+    : `setup: 已跳过${noSetup ? "（--no-setup）" : ""}`;
+
   return {
-    data: result,
+    data: {
+      ...result,
+      plugin_id: result.id,
+      // backends 保留为兼容别名；backend_ids 是脚本应使用的稳定字段。
+      backends: backendIds,
+      backend_ids: backendIds,
+      setup: setupReport,
+      restarted: false,
+    },
     human: [
       `已安装 ${result.name} (${result.id}) v${result.version}`,
       `能力: ${result.provides.join(", ")}`,
+      `后端: ${backendIds.length > 0 ? backendIds.join(", ") : "-"}`,
       `路径: ${result.path}`,
+      setupLine,
       "重启网关后生效。",
     ].join("\n"),
   };
 }
 
-function runList(root: string, args: string[]): CommandResult {
-  if (args.length > 0) {
-    throw usageError(`list 不接受额外参数：${args.join(" ")}`);
+function runList(root: string, reporter: Reporter, args: string[]): CommandResult {
+  const positional = withoutGlobals(args);
+  if (positional.length > 0) {
+    throw usageError(`list 不接受额外参数：${positional.join(" ")}`);
   }
-  const extensions = api.list(root);
+  const extensions = listExtensionsWithBackends(root, reporter);
   return {
     data: { extensions },
     human: renderList(extensions),
   };
 }
 
-async function runRemove(root: string, args: string[]): Promise<CommandResult> {
-  if (args.length !== 1) {
-    throw usageError("用法: asg extensions remove <id>");
+async function runSetup(
+  root: string,
+  reporter: Reporter,
+  args: string[],
+): Promise<CommandResult> {
+  const status = takeFlag(args, "--status");
+  const uninstall = takeFlag(args, "--uninstall");
+  const requested = takeRepeated(args, "--backend");
+  const positional = withoutGlobals(args);
+
+  if (status && uninstall) usage("--status 与 --uninstall 只能二选一");
+  if (positional.length !== 1) usage(SETUP_USAGE);
+
+  const id = positional[0]!;
+  const manifest = api.loadManifest(root, id);
+  const declared = manifest.backends ?? [];
+  if (declared.length === 0) {
+    throw new CliError("CONFIG_INVALID", EXIT.INVALID, `该插件没有声明后端：${id}`);
   }
-  const result = await api.remove(root, args[0]!);
+
+  const selected = selectBackends(id, declared, requested);
+  const action: SetupAction = status ? "status" : uninstall ? "uninstall" : "install";
+  const report = await runManifestSetup(root, reporter, manifest, action, selected);
+
+  if (!report.ok) {
+    throw new CliError(
+      "PLUGIN_FAILED",
+      EXIT.FAIL,
+      `插件 ${id} 的 setup 失败（action=${action}）：${report.error ?? "未知错误"}\n` +
+        `可修复后重试 \`asg extensions setup ${id}\`。`,
+      { id, action, backends: selected, error: report.error },
+    );
+  }
+
   return {
-    data: result,
-    human: `${result.id} 已卸载。`,
+    data: {
+      id,
+      plugin_id: id,
+      action,
+      // backends 保留为兼容别名；backend_ids 是脚本应使用的稳定字段。
+      backends: selected,
+      backend_ids: selected,
+      ok: report.ok,
+      result: report.result,
+      setup: report,
+      restarted: false,
+    },
+    human: [
+      `已执行 ${manifest.name} (${id}) 的 setup（action=${action}）。`,
+      `后端: ${selected.join(", ")}`,
+      `结果: ${formatSetupResult(report.result)}`,
+      "未自动重启网关；重启网关后生效。",
+    ].join("\n"),
+  };
+}
+
+async function runRemove(
+  root: string,
+  reporter: Reporter,
+  args: string[],
+): Promise<CommandResult> {
+  const keepData = takeFlag(args, "--keep-data");
+  const force = takeFlag(args, "--force");
+  const positional = withoutGlobals(args);
+  if (positional.length !== 1) {
+    throw usageError(REMOVE_USAGE);
+  }
+
+  const id = positional[0]!;
+  let manifest: ExtensionManifest | undefined;
+  try {
+    manifest = api.loadManifest(root, id);
+  } catch (error) {
+    const cliError =
+      error instanceof CliError
+        ? error
+        : new CliError("PLUGIN_FAILED", EXIT.FAIL, error instanceof Error ? error.message : String(error));
+
+    if (cliError.code === "PLUGIN_UNKNOWN") {
+      // 未安装：交给 remove 输出标准的 PLUGIN_UNKNOWN（退出码 4）。
+    } else if (!force) {
+      throw new CliError(
+        "PLUGIN_FAILED",
+        EXIT.INVALID,
+        `无法读取插件 manifest：${cliError.message}\n处理：确认后可加 --force 跳过卸载 setup 直接删除。`,
+      );
+    } else {
+      reporter.info(`警告: 无法读取插件 manifest，已跳过卸载 setup：${cliError.message}`);
+    }
+  }
+
+  const declared = manifest?.backends ?? [];
+  const backendIds = declared.map((backend) => backend.id);
+
+  let setupReport: SetupReport | null = null;
+  if (!force && manifest && backendIds.length > 0) {
+    setupReport = await runManifestSetup(root, reporter, manifest, "uninstall", backendIds);
+    if (!setupReport.ok) {
+      throw new CliError(
+        "PLUGIN_FAILED",
+        EXIT.FAIL,
+        `插件 ${id} 的卸载 setup 失败：${setupReport.error ?? "未知错误"}\n` +
+          `插件目录未删除；可运行 \`asg extensions setup ${id} --uninstall\` 重试，或使用 --force 直接删除。`,
+        { id, backends: backendIds, error: setupReport.error },
+      );
+    }
+  }
+
+  const result = await api.remove(root, id);
+
+  const dataDir = extensionDataDir(root, id);
+  const hadData = existsSync(dataDir);
+  if (!keepData && hadData) {
+    try {
+      rmSync(dataDir, { recursive: true, force: true });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const message =
+        `插件已卸载，但数据目录删除失败：${dataDir}（id=${result.id}）\n` +
+        `原因：${reason}\n` +
+        "插件目录已删除；可手动删除该数据目录，或忽略（下次安装会沿用）。";
+      const cliError = new CliError("PLUGIN_FAILED", EXIT.FAIL, message, {
+        plugin_id: result.id,
+        id: result.id,
+        path: dataDir,
+        error,
+        restarted: false,
+      });
+      cliError.cause = error;
+      throw cliError;
+    }
+  }
+
+  const lines = [`${result.id} 已卸载。`];
+  lines.push(
+    keepData
+      ? "已保留插件数据（--keep-data）。"
+      : hadData
+        ? `已删除数据目录：data/extension-data/${result.id}`
+        : "没有需要删除的插件数据。",
+  );
+  if (setupReport?.attempted) {
+    lines.push(`后端卸载 setup: 已完成（${setupReport.backends.join(", ")}）`);
+  }
+  lines.push("重启网关后生效。");
+
+  return {
+    data: {
+      ...result,
+      plugin_id: result.id,
+      // backends 保留为兼容别名；backend_ids 是脚本应使用的稳定字段。
+      backends: backendIds,
+      backend_ids: backendIds,
+      setup: setupReport,
+      data_removed: !keepData && hadData,
+      restarted: false,
+    },
+    human: lines.join("\n"),
   };
 }
 
@@ -724,10 +1143,12 @@ export const run: CommandFn = async ({ root, reporter, rest }) => {
       return runSearch(args);
     case "install":
       return runInstall(root, reporter, args);
+    case "setup":
+      return runSetup(root, reporter, args);
     case "list":
-      return runList(root, args);
+      return runList(root, reporter, args);
     case "remove":
-      return runRemove(root, args);
+      return runRemove(root, reporter, args);
     case "config":
       return runConfig(root, reporter, args);
     case "secret":
@@ -739,7 +1160,7 @@ export const run: CommandFn = async ({ root, reporter, rest }) => {
       throw usageError(USAGE);
     default:
       throw usageError(
-        `未知 extensions 子命令：${subcommand}（可用: search | install | list | remove | config | secret）`,
+        `未知 extensions 子命令：${subcommand}（可用: search | install | setup | list | remove | config | secret）`,
       );
   }
 };

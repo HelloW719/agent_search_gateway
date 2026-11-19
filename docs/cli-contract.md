@@ -3,7 +3,7 @@
 - 状态：已实现（0.3.6）
 - 目标版本：0.3.0
 - 适用范围：安装完成后的运行期管理，以及只读的数据面冒烟测试
-- 相关：ADR-0018（CLI 控制面）、ADR-0019（GUI 只调 CLI）
+- 相关：ADR-0018（CLI 控制面）、ADR-0019（GUI 只调 CLI）、ADR-0022（插件自管后端与 setup 钩子）
 
 ## 0. 一句话
 
@@ -266,6 +266,8 @@ asg fetch <url> [--max-chars <n>] [--render auto|always|never] [--timeout <秒>]
 | 扩展插件私有配置 | `gateway.yaml` → `extensions.<manifest id>.config` |
 | 扩展引擎密钥 | `secrets.yaml` → `extensions.<engineId>.<name>` |
 | 扩展插件密钥（推荐） | `secrets.yaml` → `extensions.<manifest id>.<name>` |
+| 插件后端安装状态 | `data/extension-data/<id>/backends.json`（由插件 setup 写入） |
+| 插件私有数据 | `data/extension-data/<id>/`（更新插件不覆盖） |
 | 插件命令 | `gateway.yaml` |
 | 广告过滤 level | `gateway.yaml` |
 
@@ -462,7 +464,11 @@ extensions:
 
 网关原生引擎的元数据与运行期实现由 `src/engines/registry.ts` 的 provider 注册表提供；新增源只需加 provider 文件与注册行，不改 CLI 层。
 
-### 5.6 插件
+### 5.6 插件后端（`asg plugins`，已弃用）
+
+> **过渡说明（0.3.x）**：后端由插件自己安装（manifest `backends` + `setup`，见
+> `docs/extensions.md` 与 ADR-0022）。新用法是 `asg extensions install/setup/remove`；
+> `asg plugins` 只保留为兼容 facade。
 
 ```text
 asg plugins list
@@ -470,49 +476,84 @@ asg plugins install <name>
 asg plugins remove <name>
 ```
 
-- `<name>` 接受旧安装名（`bili` / `ytdlp` / `opencli` / `article`）、规范通道 ID
-  （`bilibili:kukemc` / `bilibili:ytdlp` / `bilibili:article` / `weibo:opencli`）
-  以及通道别名；`cnki:http` 是通道 ID，CNKI 取件插件使用
-  `asg extensions install djasdh/agent-search-gateway-plugin-cnki` 安装；
-- `install` / `remove` 以子进程调用 `scripts/backends/cli.mjs <name> <action> --root <ROOT> --json`；
-- 由安装器自己改 `gateway.yaml`、写 `data/backends/<name>/`；
-- 成功 → 整栈重启；失败 → 不自动回滚，报告 `previous.json` 路径；
-- `list` 只读，离线可用，`enabled` 表示对应 command 非空；
-- `list` 输出增加 `platform` / `channel` / `channel_id`（平台 ID、通道名、完整通道 ID），JSON 示例：
+解析顺序：
+
+1. 在 `data/extensions/*/asg-plugin.json` 的 `backends[]` 中按 `backend.id` 或
+   `aliases` 精确匹配；命中后对对应后端执行 setup（`install` / `uninstall`），
+   成功后整栈重启；
+2. 未命中时回退旧的 `scripts/backends/cli.mjs <name> <action> --root <ROOT> --json`，
+   名字原样透传；由旧安装器修改 `gateway.yaml`、写 `data/backends/<name>/`；
+   成功后整栈重启；
+3. 两者都没有：`PLUGIN_UNKNOWN`（退出码 4），提示使用 `asg extensions install`。
+
+- `list` 只读、离线可用，不执行插件代码。先列 manifest 后端，再补上
+  `data/backends/*` 中未被覆盖的旧安装。
+- manifest 后端条目的 `name` 取 `aliases[0]`，没有旧名时取 `backend.id`；
+  `installed` 来自 `backends.json` 或后端目录是否存在；
+  P1 的 `platform` / `channel` / `channel_id` 保留字段但为空字符串。
+- 未命中 manifest 的旧安装 `enabled` 为 `false`（旧安装器没有运行期开关信息）。
+
+JSON 示例：
 
 ```json
 {
   "plugins": [
     {
-      "name": "bili",
-      "platform": "bilibili",
-      "channel": "kukemc",
-      "channel_id": "bilibili:kukemc",
+      "name": "example-service",
+      "plugin_id": "example-plugin",
+      "backend_id": "example-api",
+      "aliases": ["example-service"],
+      "platform": "",
+      "channel": "",
+      "channel_id": "",
       "installed": true,
       "version": "1.2.3",
       "enabled": true,
-      "path": "data/backends/bili"
+      "path": "data/extension-data/example-plugin/backends/example-api"
     }
   ]
 }
 ```
 
+未命中 manifest 的旧安装只包含 `name` / 空平台字段 / `installed` / `version`（若
+`version.json` 可读）/ `enabled: false` / `path: data/backends/<name>`。
+
 ### 5.6.1 第三方扩展
 
 ```text
 asg extensions search [query] [--limit N]
-asg extensions install <owner/repo>[@version]
+asg extensions install <owner/repo>[@version] [--backend <id>]... [--no-setup]
+asg extensions setup <id> [--backend <id>]... [--status] [--uninstall]
 asg extensions list
-asg extensions remove <id>
+asg extensions remove <id> [--keep-data] [--force]
 asg extensions config <id> [--get [key]] [--set key=value]... [--unset key]... [--file <path>] [--describe]
 asg extensions secret <id> --name <name> --stdin | --clear
 ```
 
-- 插件在 `asg-plugin.json` 里自行声明 `provides`：`search` / `fetch` / 两者；
+- 插件在 `asg-plugin.json` 里声明 `provides`（`search` / `fetch` / 两者）；
+  `api_version: 2` 时还可以声明 `backends`（`id` / `name` / `description` / `aliases`）。
+  `api_version: 1` 不得声明非空 `backends`；未知字段会被拒绝。
 - 安装包为单文件 ESM：Release 资产包含 `asg-plugin.json`、`entry` 指向的文件与 `SHA256SUMS`；
-- 安装目录 `<ROOT>/data/extensions/<id>/`，目录存在即视为已安装；`remove` 只删该目录；
-- 官方 id（`bilibili` / `weibo` / `cnki`）与普通第三方 id 一样安装/卸载；
-- 安装/卸载后需要重启网关（`asg restart`）或下次运行 `asg engines` 时生效；不会自动重启；
+  入口可以额外导出 `setup(ctx)`。
+- 安装目录 `<ROOT>/data/extensions/<id>/`，目录存在即视为已安装；插件可写数据在
+  `<ROOT>/data/extension-data/<id>/`，更新插件不会覆盖。`data/backends` 是旧目录，
+  只作为迁移读取源，CLI 不会删除。
+- 官方 id（`bilibili` / `weibo` / `cnki`）与普通第三方 id 一样安装/卸载。
+- `install` 默认执行 manifest 声明的全部后端 setup；`--backend <id>` 可重复，只执行指定后端；
+  `--no-setup` 跳过执行但仍报告后端。给未声明后端的插件传 `--backend`，或 id 不在
+  manifest 中，报 `CONFIG_INVALID`（退出码 4）。
+- setup 失败时插件保留，报 `PLUGIN_FAILED`（退出码 1），可修复后运行
+  `asg extensions setup <id>` 重试。
+- `setup` 默认 `action=install`；`--status` / `--uninstall` 切换 action，两者互斥；
+  插件没有声明后端时报 `CONFIG_INVALID`。
+- `remove` 默认先执行全部后端的 `uninstall` setup，失败则不删除插件目录；
+  `--force` 跳过 setup（manifest 损坏时也可用）。删除插件目录后默认删除
+  `data/extension-data/<id>`，`--keep-data` 保留。
+- `install` / `setup` / `remove` **不会自动重启**；需要重启网关（`asg restart`）
+  或下次运行 `asg engines` 时生效。
+- `list` 表格列为 `ID / VERSION / PROVIDES / BACKENDS / ENTRY`；`BACKENDS` 渲染为
+  `<id>@<version>` / `<id>` / `<id>(未安装)`，无后端显示 `-`。读取
+  `data/extension-data/<id>/backends.json`，不执行插件代码；状态文件损坏只告警。
 - `config` 读写 `gateway.yaml → extensions.<id>.config`；`id` 是 manifest id，不是 engineId；
   `<id>` 必须指向已安装插件（未安装报 `PLUGIN_UNKNOWN`，manifest 损坏报 `PLUGIN_FAILED`）：
   - 无参数：输出补齐默认值后的完整配置；
@@ -526,7 +567,59 @@ asg extensions secret <id> --name <name> --stdin | --clear
 - `secret` 写/删 `secrets.yaml → extensions.<id>.<name>`，值只从 stdin 读，末尾一个换行会被去掉；
   空值、非法名称（要求 `[a-z][a-z0-9_-]*`）报用法错误；`secrets.yaml` 权限固定 `0600`；
 - `secret` 输出不回显明文；写入后整栈重启一次；
-- 运行时加载见 `docs/extensions.md`。
+- 运行时加载与 setup 契约见 `docs/extensions.md`。
+
+`extensions list --json` 的后端条目示例：
+
+```json
+{
+  "extensions": [
+    {
+      "id": "example-plugin",
+      "version": "0.1.0",
+      "provides": ["fetch"],
+      "entry": "index.mjs",
+      "path": "/path/to/root/data/extensions/example-plugin",
+      "backends": [
+        {
+          "id": "example-api",
+          "name": "Example API",
+          "aliases": ["example-service"],
+          "installed": true,
+          "enabled": true,
+          "version": "1.2.3",
+          "path": "/path/to/root/data/extension-data/example-plugin/backends/example-api"
+        },
+        {
+          "id": "example-cli",
+          "name": "Example CLI",
+          "installed": false,
+          "enabled": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+`extensions setup --json` 的 `data` 形如：
+
+```json
+{
+  "id": "example-plugin",
+  "action": "install",
+  "backends": ["example-api", "example-cli"],
+  "ok": true,
+  "result": { "installed": true },
+  "setup": {
+    "attempted": true,
+    "ok": true,
+    "action": "install",
+    "backends": ["example-api", "example-cli"],
+    "result": { "installed": true }
+  }
+}
+```
 
 读取 / 描述示例：
 
@@ -698,9 +791,14 @@ UPDATE_ROLLED_BACK
 | `data/runtime/supervisor.pid` | `asg serve` | 未注册服务时的 pid |
 | `data/logs/<service>.log` | `asg serve` | 服务日志 |
 | `data/deps/searxng/settings.yml` | CLI / 安装器 | searxng 配置 |
-| `data/backends/<name>/version.json` | CLI | 插件安装记录 |
+| `data/extensions/<id>/` | `asg extensions` | 已安装插件（只读；更新时整体替换） |
+| `data/extension-data/<id>/` | 插件 setup | 插件可写数据；`state.json`、`backends.json`、`backends/<id>/`、`tmp/` |
+| `data/extension-data/<id>/backends.json` | 插件 setup | 后端安装状态；`extensions list` / `plugins list` 只读 |
+| `data/backends/<name>/version.json` | 旧安装器 / `asg plugins` 回退 | 0.3.x 旧后端安装记录，只读迁移源 |
+| `data/migrations/0.3.x/` | 临时迁移脚本 | state/备份；0.4.x 随脚本目录删除 |
 
-不新增 `state.json`、`desired.json`、`pids.json`。
+不新增全局 `state.json`、`desired.json`、`pids.json`。插件自己的
+`data/extension-data/<id>/state.json` 属于插件数据，不是 CLI 控制面状态。
 
 ## 8. 脚本去留
 
@@ -710,7 +808,8 @@ UPDATE_ROLLED_BACK
 scripts/install.sh / install.ps1        引导：Node、下载、校验、解压、切 current
 scripts/install/*.mjs                   作为库被 CLI 调用
 scripts/self-update/cli.mjs             作为库被 asg update 调用
-scripts/backends/cli.mjs                作为库被 asg plugins 调用（补 --root + --json）
+scripts/backends/cli.mjs                旧安装器；仅作为 asg plugins 未命中 manifest 时的回退
+scripts/migrations/0.3.x.mjs            0.3.x 一次性迁移脚本，0.4.x 删除
 scripts/install/make-runtime.mjs        CI 专用
 scripts/bench*                          开发工具，不属于控制面
 ```
@@ -725,6 +824,9 @@ scripts/backends/*.{sh,ps1,cmd}         12 个引导壳
 scripts/self-update/*.{sh,cmd}          3 个引导壳
 scripts/update-adlist.sh                改为 asg adlist
 ```
+
+`scripts/backends/cli.mjs` 与 `data/backends` 在新契约下是过渡兼容层：插件后端的新位置是
+`data/extension-data/<id>/backends/<backend-id>`，由插件 `setup` 安装；旧目录只读、不主动删除。
 
 ## 9. 安装与升级
 

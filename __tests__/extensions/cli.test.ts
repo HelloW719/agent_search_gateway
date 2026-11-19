@@ -238,18 +238,24 @@ describe("asg extensions list", () => {
 
 describe("asg extensions remove", () => {
   it("删除后输出已卸载", async () => {
+    const root = tempRoot();
     const remove = vi.fn(async () => ({ id: "demo-fetch", removed: true as const }));
     setExtensionsApiForTests({ remove });
 
     const result = await run({
-      root: "/root",
+      root,
       reporter: fakeReporter(),
       rest: ["remove", "demo-fetch"],
     });
 
-    expect(remove).toHaveBeenCalledWith("/root", "demo-fetch");
+    expect(remove).toHaveBeenCalledWith(root, "demo-fetch");
     expect(result.human).toContain("已卸载");
-    expect(result.data).toEqual({ id: "demo-fetch", removed: true });
+    expect(result.data).toMatchObject({
+      id: "demo-fetch",
+      removed: true,
+      backends: [],
+      data_removed: false,
+    });
   });
 
   it("未知目录报 PLUGIN_UNKNOWN / 退出码 4", async () => {

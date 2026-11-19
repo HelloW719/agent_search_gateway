@@ -88,7 +88,7 @@ gateway (本服务, :3000/mcp)
 
 - `cli-kukemc`（`bili` CLI）：详情、评论
 - `cli-ytdlp`（`yt-dlp`）：详情、音频直链
-- `http`：全部能力；`http.command` 非空时由插件拉起/回收，否则连 `base_url`。服务端已拆到独立仓库 [djasdh/bilibili-article-server](https://github.com/djasdh/bilibili-article-server)，可用 `asg plugins install article` 安装。
+- `http`：全部能力；`http.command` 非空时由插件拉起/回收，否则连 `base_url`。服务端已拆到独立仓库 [djasdh/bilibili-article-server](https://github.com/djasdh/bilibili-article-server)，过渡期仍可用 `asg plugins install article`（旧命令）安装。
 
 要点：
 
@@ -358,11 +358,16 @@ asg restart
 ```
 
 - 插件自己声明 `provides`：`fetch` / `search` / 两者；微博插件同时提供 `fetch` 与搜索源。
+- 需要外部后端的插件可以在 `api_version: 2` manifest 里声明 `backends`，并导出
+  `setup(ctx)` 自己安装/更新/卸载。`install` 默认执行 setup，也可以用
+  `asg extensions setup <id> [--status] [--uninstall]` 单独重跑。
 - 插件可用可选的 `config_schema` 声明私有配置（默认值、枚举、范围等），用户用
   `asg extensions config <id> --set key=value` 读写；密钥用
   `asg extensions secret <id> --name <name> --stdin` 写入（不进 argv）。
-- 安装位置：`data/extensions/<id>/`；卸载用 `asg extensions remove <id>`。
-- 插件与网关同进程运行，没有沙箱；只安装可信来源。
+- 安装位置：`data/extensions/<id>/`；插件可写数据在 `data/plugin-data/<id>/`，
+  更新插件不会丢后端。卸载用 `asg extensions remove <id>`（默认删数据，`--keep-data` 保留）。
+- `install` / `setup` / `remove` 不会自动重启网关；`config` / `secret` 写入后仍会整栈重启。
+- 插件与网关同进程运行，没有沙箱；setup 子进程也不是沙箱。只安装可信来源。
 - 发现：GitHub topic `asg-plugin`；`asg extensions search` 只列仓库，安装仍需显式执行。
 - GitHub API 有速率限制：安装/更新插件前建议先 `export GITHUB_TOKEN=$(gh auth token)`（或 `GH_TOKEN`），否则可能遇到 403 `API rate limit exceeded`。
 - 详细契约见 [`docs/extensions.md`](docs/extensions.md)；插件开发可把 [`skills/asg-plugin-authoring/`](skills/asg-plugin-authoring/) 交给 AI 使用。
@@ -582,27 +587,43 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 - 依赖：`sqlite-vec` 随 npm 安装自带平台二进制，无需手动装扩展。
 - 模型切换：命名空间为 `provider:model@dim`；换模型产生新命名空间，旧向量保留但不参与（多命名空间并存，见 `docs/adr/0001`–`0006`）。
 
-## 后端安装（一个后端一个）
+## 后端安装（插件自管，0.3.x 过渡）
 
-外部后端统一装到 `data/backends/<name>/`，安装/更新后自动把可执行文件路径写回 `gateway.yaml`。
+从 0.3.x 起，后端由插件自己安装：manifest（`api_version: 2`）声明 `backends`，入口导出
+`setup(ctx)`，安装/更新/卸载时由 CLI 在独立子进程中调用。新位置是：
 
-| 后端 | 安装命令 | 说明 |
+```text
+data/plugin-data/<plugin-id>/backends/<backend-id>/
+```
+
+`data/backends/<name>/` 是旧安装器的目录，只作为只读迁移源：插件应复制需要的文件到新位置，
+不移动、不删除；CLI 也不会主动删除它。
+
+```bash
+asg extensions install <owner>/<repo>@<version>   # 默认执行 manifest 声明的全部后端 setup
+asg extensions setup <id> [--backend <id>]... [--status] [--uninstall]
+asg extensions list                               # BACKENDS 列显示安装状态
+asg extensions remove <id> [--keep-data] [--force]
+```
+
+`asg plugins list|install|remove` 已弃用，仅保留为兼容 facade：命中已安装 manifest 的
+`backend.id` / `legacy_names` 时走插件 setup，未命中才回退旧的
+`scripts/backends/cli.mjs` 安装器（安装到 `data/backends/<name>/`）。`asg plugins install` /
+`remove` 仍会整栈重启；`asg extensions install` / `setup` / `remove` 不会。
+
+旧安装器支持的后端（过渡期仍可用）：
+
+| 后端 | 旧命令 | 说明 |
 |---|---|---|
 | B 站 `bili` CLI | `asg plugins install bili` | PyPI `bili-agent`，需要 Python ≥3.10 |
 | `yt-dlp` | `asg plugins install ytdlp` | 官方独立二进制，自动校验 SHA256 |
 | 微博 `OpenCLI` | `asg plugins install opencli` | npm 包；微博 override 由微博扩展负责安装（过渡期可手动跑 `scripts/install-weibo-override.sh`） |
 | B 站专栏 HTTP 服务 | `asg plugins install article` | 独立仓库 `djasdh/bilibili-article-server`（GPL-3.0） |
 
-```bash
-asg plugins list
-asg plugins install bili
-asg plugins remove bili
-```
-
-- 安装目录、版本、原配置值都在 `data/backends/<name>/`，`uninstall` 会还原 `gateway.yaml`。
+- 旧安装的目录、版本、原配置值都在 `data/backends/<name>/`，旧 `uninstall` 会还原 `gateway.yaml`。
 - `opencli` 只在 `gateway.yaml` 已有 `weibo` 段时写 `weibo.cli.command`；私有分支没有该段时只安装、不写配置。
 - 专栏服务需要登录态：在启动网关的环境里设置 `BILI_COOKIE` 或 `BILI_COOKIE_FILE`，不要写进 `gateway.yaml`。
-- 如果 PATH 里没有 Node，薄包装会自动下载官方 LTS 到 `data/toolchain/node/`。
+- 如果 PATH 里没有 Node，旧薄包装会自动下载官方 LTS 到 `data/toolchain/node/`。
 - 代理环境：脚本读取 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`，优先用系统 `curl` 下载（Windows 10+ 自带 `curl.exe`）。
 - GitHub 限流：安装后端/插件前可先 `export GITHUB_TOKEN=$(gh auth token)`（或 `GH_TOKEN`），否则可能遇到 403 `API rate limit exceeded`。
 
@@ -636,7 +657,8 @@ asg config get|set|validate
 asg engines list [--all] | enable <name|group:name> | disable <name|group:name>
 asg engines route <engine> resident|rotating|none | --category <name> [--hot-category <name>] | --clear
 asg engines secret <engine> [--name <name>] --stdin | --clear
-asg plugins list|install|remove
+asg extensions search|install|setup|list|remove|config|secret
+asg plugins list|install|remove                 # 已弃用，兼容 0.3.x 旧后端名
 asg browser status|install [--full]
 asg adlist update
 asg update check|apply

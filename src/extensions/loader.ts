@@ -2,7 +2,7 @@
  *
  * 约定（见 docs/extensions.md）：
  * - 目录名必须等于 `manifest.id`，否则视为坏包；
- * - `api_version` 当前只支持 1；
+ * - `api_version` 支持 1 与 2；v2 允许声明 `backends`（加载层不消费，也不因此报错）；
  * - `provides: ["fetch"]` 读取命名导出 `fetch`，`provides: ["search"]` 读取 `engine`；
  * - 单个插件加载失败只记录 error + warn，不影响网关启动与其它插件。
  */
@@ -377,10 +377,6 @@ export async function loadExtensions(
 
     if (manifest.id !== dirName) {
       fail(result, logger, dirName, `目录名 ${dirName} 与 manifest.id ${manifest.id} 不一致`);
-      continue;
-    }
-    if (manifest.api_version !== 1) {
-      fail(result, logger, dirName, `不支持的 api_version：${String(manifest.api_version)}（当前只支持 1）`);
       continue;
     }
 

@@ -1,5 +1,14 @@
 # 后端安装脚本与网关自更新
 
+> **过渡说明（2026-11-16，ADR-0022 接管后端安装）**：本文记录的
+> `scripts/backends/` 与 `data/backends/<name>/` 仍作为 0.3.x 兼容路径存在，但新契约已改为
+> **插件自管后端**：manifest `api_version: 2` 声明 `backends`，插件入口导出 `setup(ctx)`，
+> 后端装到 `data/extension-data/<id>/backends/<backend-id>/`。`asg plugins` 已弃用：只有未命中
+> 已安装 manifest 的 `backend.id` / `aliases` 时才回退本文的旧安装器；`data/backends`
+> 只作为只读迁移源，CLI/迁移脚本不会主动删除。0.4.x 计划移除旧回退与
+> `scripts/migrations/`。自更新部分（版本目录、完整包、回滚）不受本次决策影响。
+> 历史背景与决策原文保留如下，不重写。
+
 ## 背景
 
 网关依赖若干外部后端与运行时：B 站 `bili` CLI（PyPI `bili-agent`）、`yt-dlp`、微博 `OpenCLI`（npm）、B 站专栏 HTTP 服务（`bilibili-article-server`）。此前这些都靠 README 手工安装，路径靠 PATH；网关自身升级则需要 `git pull` + `npm ci` + `npm run build`，目标机器没有开发工具链时无法完成。

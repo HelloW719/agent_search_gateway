@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installExtension,
   listExtensions,
+  loadInstalledManifest,
   parseChecksums,
   removeExtension,
   searchExtensions,
@@ -129,6 +130,7 @@ describe("安装扩展", () => {
       version: "1.2.3",
       name: "Demo Fetch",
       provides: ["fetch"],
+      backends: [],
       path: path.join(extensionsPath(root), "demo-fetch"),
     });
     expect(fs.readFileSync(path.join(result.path, "index.mjs"), "utf8")).toBe(ENTRY_TEXT);
@@ -146,6 +148,29 @@ describe("安装扩展", () => {
       "X-GitHub-Api-Version": "2022-11-28",
     });
     expect(request.headers["User-Agent"]).toMatch(/^asg\//);
+  });
+
+  it("api_version 2 的 backends 会写入安装结果与列表", async () => {
+    const root = tempRoot();
+    const backends = [
+      {
+        id: "demo-api",
+        name: "Demo API",
+        description: "示例后端",
+        aliases: ["demo_old"],
+      },
+    ];
+    const manifestText = JSON.stringify({ ...MANIFEST, api_version: 2, backends });
+    const deps = fakeDeps({ manifestText });
+
+    const result = await installExtension({ root, repo: "owner/demo", deps });
+    expect(result.backends).toEqual(backends);
+
+    const [listed] = listExtensions(root);
+    expect(listed).toMatchObject({ id: "demo-fetch", backends });
+    expect(listed!.error).toBeUndefined();
+
+    expect(loadInstalledManifest(root, "demo-fetch").backends).toEqual(backends);
   });
 
   it("指定版本先试 v<version>，404 后回退到不带 v 的 tag", async () => {
@@ -362,6 +387,7 @@ describe("列出与卸载扩展", () => {
       name: "Demo Fetch",
       version: "1.2.3",
       provides: ["fetch"],
+      backends: [],
       entry: "index.mjs",
       path: path.join(extensionsPath(root), "demo-fetch"),
     });

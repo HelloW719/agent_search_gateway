@@ -19,6 +19,30 @@ export const EXTENSION_PROVIDES = ["search", "fetch"] as const;
 
 export type ExtensionProvide = (typeof EXTENSION_PROVIDES)[number];
 
+/** manifest 声明的后端（P1 起 api_version 2 可用）：只描述身份与旧名，不承载代码。 */
+const backendSchema = z
+  .object({
+    id: z
+      .string()
+      .regex(
+        EXTENSION_ID_RE,
+        "backends[].id 必须是 3-64 位小写字母/数字/._-，且首尾为字母或数字",
+      ),
+    name: z
+      .string()
+      .min(1, "backends[].name 不能为空")
+      .max(80, "backends[].name 最长 80 个字符"),
+    description: z.string().optional(),
+    /** 旧 asg plugins 的输入名；用于兼容历史配置/密钥键。 */
+    aliases: z
+      .array(z.string().min(1, "aliases 不能包含空字符串"))
+      .refine((items) => new Set(items).size === items.length, "aliases 不能包含重复项")
+      .optional(),
+  })
+  .strict();
+
+export type ExtensionBackend = z.infer<typeof backendSchema>;
+
 const manifestSchema = z
   .object({
     id: z
@@ -28,7 +52,7 @@ const manifestSchema = z
     version: z
       .string()
       .regex(EXTENSION_VERSION_RE, "version 必须是语义化版本，例如 1.2.3 或 1.2.3-beta.1"),
-    api_version: z.literal(1, "api_version 当前只支持 1"),
+    api_version: z.literal([1, 2], "api_version 只支持 1 或 2"),
     provides: z
       .array(z.enum(EXTENSION_PROVIDES, "provides 只能包含 search / fetch"))
       .min(1, "provides 至少声明一项能力")
@@ -42,10 +66,38 @@ const manifestSchema = z
       .regex(/^[a-z0-9-]+$/, "platform 只能是小写字母/数字/-")
       .optional(),
     description: z.string().optional(),
+    /** api_version 2 起可声明的后端；非空时必须 api_version === 2。 */
+    backends: z.array(backendSchema).optional(),
     /** 插件私有配置的声明（JSON Schema 子集）；校验见 config.ts。 */
     config_schema: z.unknown().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((manifest, ctx) => {
+    const backends = manifest.backends;
+    if (!backends || backends.length === 0) return;
+
+    if (manifest.api_version !== 2) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["backends"],
+        message: "声明 backends 需要 api_version: 2",
+      });
+      return;
+    }
+
+    const seen = new Set<string>();
+    for (const [index, backend] of backends.entries()) {
+      if (seen.has(backend.id)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["backends", index, "id"],
+          message: `backends 不能包含重复 id：${backend.id}`,
+        });
+      } else {
+        seen.add(backend.id);
+      }
+    }
+  });
 
 type ParsedManifest = z.infer<typeof manifestSchema>;
 

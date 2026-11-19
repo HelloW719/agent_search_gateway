@@ -303,7 +303,7 @@ describe("坏包隔离与校验", () => {
 
   it("api_version 不兼容时跳过并记录 error", async () => {
     const root = tempRoot();
-    writeExtension(root, "demo-fetch", manifest({ api_version: 2 }), FETCH_ENTRY);
+    writeExtension(root, "demo-fetch", manifest({ api_version: 3 }), FETCH_ENTRY);
 
     const loaded = await loadExtensions(root);
     expect(loaded.fetch).toEqual([]);
@@ -311,6 +311,32 @@ describe("坏包隔离与校验", () => {
       id: "demo-fetch",
       error: expect.stringContaining("api_version"),
     });
+  });
+
+  it("api_version 2 + backends 正常加载，api 1 不受影响", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-v2",
+      manifest({
+        id: "demo-v2",
+        api_version: 2,
+        backends: [
+          {
+            id: "demo-api",
+            name: "Demo API",
+            description: "示例后端",
+            aliases: ["demo_old"],
+          },
+        ],
+      }),
+      FETCH_ENTRY,
+    );
+    writeExtension(root, "demo-v1", manifest({ id: "demo-v1" }), FETCH_ENTRY);
+
+    const loaded = await loadExtensions(root);
+    expect(loaded.errors).toEqual([]);
+    expect(loaded.fetch.map((plugin) => plugin.id)).toEqual(["demo-v1", "demo-v2"]);
   });
 
   it("缺少 manifest / 条目导入失败时只记录对应错误", async () => {

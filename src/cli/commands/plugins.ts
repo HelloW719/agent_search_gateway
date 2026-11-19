@@ -1,8 +1,10 @@
-/** asg plugins list|install|remove */
+/** asg plugins list|install|remove（已弃用，保留为 extensions 的兼容 facade）。 */
 
 import type { CommandFn } from "../context.js";
 import { CliError, EXIT } from "../errors.js";
 import { listPlugins, pluginAction, type PluginStatus } from "../deps/plugins.js";
+
+const DEPRECATED = "asg plugins 已弃用，请使用 asg extensions install/setup/remove。";
 
 const USAGE = `用法: asg plugins <list|install|remove> [name]
 
@@ -10,15 +12,15 @@ const USAGE = `用法: asg plugins <list|install|remove> [name]
   install <name> 安装并整栈重启
   remove <name>  卸载并整栈重启
 
-旧名：bili、ytdlp、opencli、article
-规范通道：bilibili:kukemc、bilibili:ytdlp、bilibili:article、weibo:opencli`;
+${DEPRECATED}
+旧名/通道名由已安装插件的 asg-plugin.json → backends[].aliases 提供。`;
 
 function renderList(plugins: PluginStatus[]): string {
   const header = ["NAME", "PLATFORM", "CHANNEL", "INSTALLED", "VERSION", "ENABLED"];
   const rows = plugins.map((plugin) => [
     plugin.name,
-    plugin.platform,
-    plugin.channel_id,
+    plugin.platform || "-",
+    plugin.channel_id || "-",
     plugin.installed ? "yes" : "no",
     plugin.version ?? "-",
     plugin.enabled ? "yes" : "no",
@@ -30,7 +32,12 @@ function renderList(plugins: PluginStatus[]): string {
   const formatRow = (row: string[]): string =>
     row.map((cell, index) => cell.padEnd(widths[index]!)).join("  ").trimEnd();
 
-  return [formatRow(header), ...rows.map((row) => formatRow(row))].join("\n");
+  return [
+    formatRow(header),
+    ...rows.map((row) => formatRow(row)),
+    "",
+    DEPRECATED,
+  ].join("\n");
 }
 
 export const run: CommandFn = async ({ root, reporter, rest }) => {
@@ -41,7 +48,7 @@ export const run: CommandFn = async ({ root, reporter, rest }) => {
       throw new CliError("UNEXPECTED", EXIT.USAGE, `list 不接受额外参数：${args.join(" ")}`);
     }
     const plugins = listPlugins(root);
-    return { data: { plugins }, human: renderList(plugins) };
+    return { data: { plugins, deprecated: DEPRECATED }, human: renderList(plugins) };
   }
 
   if (subcommand === "install" || subcommand === "remove") {
@@ -57,8 +64,8 @@ export const run: CommandFn = async ({ root, reporter, rest }) => {
     });
     const verb = subcommand === "install" ? "安装" : "卸载";
     return {
-      data: result,
-      human: `${result.name} 已${verb}，整栈已重启。`,
+      data: { ...result, deprecated: DEPRECATED },
+      human: `${result.name} 已${verb}，整栈已重启。\n${DEPRECATED}`,
     };
   }
 

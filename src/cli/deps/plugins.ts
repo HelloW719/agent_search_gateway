@@ -1,62 +1,42 @@
 /** 外部后端（插件）的列表、安装与卸载。
  *
- * install/remove 通过子进程调用 release 内的 scripts/backends/cli.mjs，
- * 该脚本负责写 gateway.yaml 与 data/backends/<name>/；CLI 只转发事件并在成功后整栈重启。
+ * P1 起后端身份完全由已安装插件的 manifest 决定（`asg-plugin.json → backends`），
+ * 核心不再内置任何平台名/旧安装名。`asg plugins` 只是兼容 facade：
+ *
+ * 1. 先在 `data/extensions/*` 的 manifest backends 中按 backend.id / aliases 精确匹配；
+ * 2. 未命中时回退到旧的 `scripts/backends/cli.mjs` 子进程，名字原样透传；
+ * 3. 都没有则报 PLUGIN_UNKNOWN，并提示用 `asg extensions install` 安装插件。
+ *
+ * install/remove 成功后保持旧行为：整栈重启。
  */
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import YAML from "yaml";
 import { CliError, EXIT } from "../errors.js";
 import type { Reporter } from "../output.js";
-import { exists, nodePath, releaseDir, rootPaths } from "../root.js";
+import { exists, nodePath, releaseDir } from "../root.js";
 import { restartForConfig } from "../runtime/stack.js";
-import { channelById, normalizeChannel } from "../../fetch/channels/registry.js";
+import { listExtensions, loadInstalledManifest } from "../../extensions/install.js";
+import type { ExtensionBackend, ExtensionManifest } from "../../extensions/manifest.js";
+import {
+  runPluginSetup,
+  type RunPluginSetupOptions,
+  type RunPluginSetupResult,
+} from "../../extensions/setup/runner.js";
 
-export const PLUGIN_NAMES = ["bili", "ytdlp", "opencli", "article"] as const;
-
-export type PluginName = (typeof PLUGIN_NAMES)[number];
-
-/** 安装名 → 规范通道 ID（`platform:channel`）。 */
-const PLUGIN_CHANNEL: Record<PluginName, string> = {
-  bili: "bilibili:kukemc",
-  ytdlp: "bilibili:ytdlp",
-  article: "bilibili:article",
-  opencli: "weibo:opencli",
-};
-
-const CHANNEL_PLUGIN = new Map<string, PluginName>(
-  (Object.entries(PLUGIN_CHANNEL) as Array<[PluginName, string]>).map(([name, id]) => [id, name]),
-);
-
-/** 安装器可接受的规范通道（用于错误提示）。 */
-const CANONICAL_CHANNELS = PLUGIN_NAMES.map((name) => PLUGIN_CHANNEL[name]);
-
-/** 逻辑名 → data/backends 下的目录名（article 的历史目录是 article-server）。 */
-const INSTALL_DIR_NAME: Record<PluginName, string> = {
-  bili: "bili",
-  ytdlp: "ytdlp",
-  opencli: "opencli",
-  article: "article-server",
-};
-
-/** 各插件在 gateway.yaml 中对应的命令字段；非空即视为启用。 */
-const CONFIG_KEYS: Record<PluginName, string[]> = {
-  bili: ["bilibili", "cli_kukemc", "command"],
-  ytdlp: ["bilibili", "cli_ytdlp", "command"],
-  opencli: ["weibo", "cli", "command"],
-  article: ["bilibili", "http", "command"],
-};
-
+/** 兼容 facade 的插件状态。平台/通道字段暂时保留为空字符串。 */
 export interface PluginStatus {
-  name: PluginName;
-  /** 规范平台 ID（如 `bilibili`）。 */
+  name: string;
+  plugin_id?: string;
+  backend_id?: string;
+  aliases?: string[];
+  /** 规范平台 ID；P1 暂不填充。 */
   platform: string;
-  /** 通道名（如 `kukemc`）。 */
+  /** 通道名；P1 暂不填充。 */
   channel: string;
-  /** 完整规范通道 ID（如 `bilibili:kukemc`）。 */
+  /** 完整规范通道 ID；P1 暂不填充。 */
   channel_id: string;
   installed: boolean;
   version?: string;
@@ -138,14 +118,16 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function parseEventLine(line: string): Record<string, unknown> | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return null;
   try {
     const data: unknown = JSON.parse(trimmed);
-    if (data && typeof data === "object" && !Array.isArray(data)) {
-      return data as Record<string, unknown>;
-    }
+    if (isRecord(data)) return data;
   } catch {
     // 不是合法 JSON，按普通日志处理。
   }
@@ -171,73 +153,76 @@ export function forwardChildLine(reporter: Reporter, line: string, service: stri
   reporter.event({ event: "log", service, line, message: line });
 }
 
-export function isPluginName(value: string): value is PluginName {
-  return (PLUGIN_NAMES as readonly string[]).includes(value);
-}
-
-/**
- * 把用户输入归一化成安装名：
- * 1. 精确匹配旧安装名（bili / ytdlp / opencli / article）；
- * 2. 再按通道 ID 或别名归一化，映射回安装名。
- * `cnki:http` 是内置平台，不可安装，返回 undefined。
- */
-export function normalizePluginInput(value: string): PluginName | undefined {
-  if (isPluginName(value)) return value;
-  const channel = normalizeChannel(value);
-  return channel ? CHANNEL_PLUGIN.get(channel.id) : undefined;
-}
-
-/** 未知插件名：PLUGIN_UNKNOWN / 退出码 4。 */
-export function assertPluginName(value: string): PluginName {
-  const name = normalizePluginInput(value);
-  if (name) return name;
-  const channel = normalizeChannel(value);
-  const builtinHint = channel?.id === "cnki:http" ? "；cnki 是内置平台，无需安装" : "";
-  throw new CliError(
-    "PLUGIN_UNKNOWN",
-    EXIT.INVALID,
-    `未知插件：${value}（旧名：${PLUGIN_NAMES.join(" / ")}；规范通道：${CANONICAL_CHANNELS.join(" / ")}）${builtinHint}`,
-  );
-}
-
 export function backendsDir(root: string): string {
   return path.join(root, "data", "backends");
 }
 
-export function pluginInstallDir(root: string, name: PluginName): string {
-  return path.join(backendsDir(root), INSTALL_DIR_NAME[name]);
+/** P1 插件可写数据目录：`data/extension-data/<id>`（与 setup host 保持一致）。 */
+export function extensionDataDir(root: string, pluginId: string): string {
+  return path.join(root, "data", "extension-data", pluginId);
 }
 
-export function pluginPreviousFile(root: string, name: PluginName): string {
-  return path.join(pluginInstallDir(root, name), "previous.json");
+/** setup host 写入的后端状态文件：`data/extension-data/<id>/backends.json`。 */
+export function backendStateFile(root: string, pluginId: string): string {
+  return path.join(extensionDataDir(root, pluginId), "backends.json");
 }
 
-function readConfig(root: string): Record<string, unknown> {
+/** 单个后端的安装目录：`data/extension-data/<id>/backends/<backendId>`。 */
+export function backendInstallDir(
+  root: string,
+  pluginId: string,
+  backendId: string,
+): string {
+  return path.join(extensionDataDir(root, pluginId), "backends", backendId);
+}
+
+export interface BackendStateRead {
+  states: Record<string, unknown>;
+  /** 状态文件不可读/损坏时的告警；调用方决定如何展示。 */
+  warning?: string;
+}
+
+/** 只读状态文件；缺失视为空，损坏只返回告警，不抛异常。 */
+export function readBackendStates(root: string, pluginId: string): BackendStateRead {
+  const file = backendStateFile(root, pluginId);
+  let text: string;
   try {
-    const raw: unknown = YAML.parse(fs.readFileSync(rootPaths(root).config, "utf8"));
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      return raw as Record<string, unknown>;
-    }
-  } catch {
-    // 配置缺失或不可解析：列表仍应离线可用，全部按未启用处理。
+    text = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { states: {} };
+    return { states: {}, warning: `无法读取 ${file}：${messageOf(error)}` };
   }
-  return {};
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return { states: {}, warning: `后端状态文件不是合法 JSON：${file}：${messageOf(error)}` };
+  }
+  if (!isRecord(raw)) {
+    return { states: {}, warning: `后端状态文件必须是 JSON 对象：${file}` };
+  }
+  return { states: raw };
 }
 
-function dig(value: unknown, keys: string[]): unknown {
-  let current = value;
-  for (const key of keys) {
-    if (!current || typeof current !== "object") return undefined;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return current;
+export interface BackendStateInfo {
+  installed: boolean;
+  enabled: boolean;
+  version?: string;
+  path?: string;
 }
 
-function commandEnabled(config: Record<string, unknown>, keys: string[]): boolean {
-  const value = dig(config, keys);
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === "string") return value.trim() !== "";
-  return false;
+/** 把状态文件里任意形状的单条记录归一化；缺失/非法值按未安装处理。 */
+export function normalizeBackendState(raw: unknown): BackendStateInfo {
+  if (raw === undefined || raw === null) return { installed: false, enabled: false };
+  if (!isRecord(raw)) return { installed: true, enabled: false };
+
+  const installed = typeof raw.installed === "boolean" ? raw.installed : true;
+  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : installed;
+  const state: BackendStateInfo = { installed, enabled };
+  if (typeof raw.version === "string" && raw.version.length > 0) state.version = raw.version;
+  if (typeof raw.path === "string" && raw.path.length > 0) state.path = raw.path;
+  return state;
 }
 
 interface VersionRecord {
@@ -260,62 +245,213 @@ function readVersionRecord(dir: string): VersionRecord {
   }
 }
 
-/** 只读本地文件，离线可用，不触碰网络与服务。 */
+/**
+ * 只读本地文件，离线可用，不触碰网络与服务。
+ *
+ * 1. 扫描 `data/extensions/*` 的 manifest backends，生成通用 PluginStatus；
+ * 2. 再补上 `data/backends/*` 中未被任何 manifest backend（id / aliases / state.path）
+ *    覆盖的旧安装。
+ */
 export function listPlugins(root: string): PluginStatus[] {
-  const config = readConfig(root);
-  return PLUGIN_NAMES.map((name) => {
-    const dir = pluginInstallDir(root, name);
+  const plugins: PluginStatus[] = [];
+  const coveredDirs = new Set<string>();
+
+  for (const extension of listExtensions(root)) {
+    const backends = extension.backends ?? [];
+    if (backends.length === 0) continue;
+
+    const { states } = readBackendStates(root, extension.id);
+    for (const backend of backends) {
+      const state = normalizeBackendState(states[backend.id]);
+      const backendDir = backendInstallDir(root, extension.id, backend.id);
+      const dirInstalled = exists(backendDir);
+      const installed = state.installed || dirInstalled;
+
+      coveredDirs.add(backend.id);
+      for (const legacy of backend.aliases ?? []) coveredDirs.add(legacy);
+      if (state.path) coveredDirs.add(path.basename(state.path));
+
+      const plugin: PluginStatus = {
+        name: backend.aliases?.[0] ?? backend.id,
+        plugin_id: extension.id,
+        backend_id: backend.id,
+        aliases: [...(backend.aliases ?? [])],
+        platform: "",
+        channel: "",
+        channel_id: "",
+        installed,
+        enabled: state.enabled,
+      };
+      const version = state.version ?? (dirInstalled ? readVersionRecord(backendDir).version : undefined);
+      if (version) plugin.version = version;
+      if (state.path) plugin.path = state.path;
+      else if (dirInstalled) plugin.path = backendDir;
+      plugins.push(plugin);
+    }
+  }
+
+  const legacyDir = backendsDir(root);
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(legacyDir, { withFileTypes: true });
+  } catch {
+    // 旧后端目录缺失或不可读：manifest 的结果仍然可用。
+    entries = [];
+  }
+
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    if (coveredDirs.has(entry.name)) continue;
+
+    const dir = path.join(legacyDir, entry.name);
     const record = readVersionRecord(dir);
-    const channel = channelById(PLUGIN_CHANNEL[name]);
-    const entry: PluginStatus = {
-      name,
-      platform: channel?.platform ?? "",
-      channel: channel?.channel ?? "",
-      channel_id: channel?.id ?? "",
-      installed: record.installed,
-      enabled: commandEnabled(config, CONFIG_KEYS[name]!),
+    const plugin: PluginStatus = {
+      name: entry.name,
+      platform: "",
+      channel: "",
+      channel_id: "",
+      installed: true,
+      enabled: false,
+      path: dir,
     };
-    if (record.version) entry.version = record.version;
-    if (record.installed) entry.path = dir;
-    return entry;
-  });
+    if (record.version) plugin.version = record.version;
+    plugins.push(plugin);
+  }
+
+  return plugins;
 }
+
+export type SetupRunner = (options: RunPluginSetupOptions) => Promise<RunPluginSetupResult>;
 
 export interface PluginActionOptions {
   root: string;
   name: string;
   action: PluginAction;
   reporter: Reporter;
+  /** 旧安装脚本的流式 runner（仅在回退到 scripts/backends/cli.mjs 时使用）。 */
   runner?: StreamRunner;
   restart?: (root: string, reporter: Reporter) => Promise<void>;
+  /** 测试注入点；默认 runPluginSetup。 */
+  setup?: SetupRunner;
 }
 
 export interface PluginActionResult {
-  name: PluginName;
+  name: string;
   action: PluginAction;
   restarted: boolean;
+  /** manifest backend 或旧安装脚本。 */
+  source: "extension" | "legacy";
+  plugin_id?: string;
+  backend_id?: string;
 }
 
-/** 安装/卸载：子进程执行安装器，事件透传，成功后整栈重启；失败不回滚只报告。 */
+interface BackendMatch {
+  manifest: ExtensionManifest;
+  backend: ExtensionBackend;
+}
+
+/** 在已安装 manifest 的 backends 中按 backend.id 或 aliases 精确匹配。 */
+function findBackendMatch(root: string, name: string): BackendMatch | undefined {
+  for (const extension of listExtensions(root)) {
+    const backend = (extension.backends ?? []).find(
+      (item) => item.id === name || (item.aliases ?? []).includes(name),
+    );
+    if (!backend) continue;
+    try {
+      return { manifest: loadInstalledManifest(root, extension.id), backend };
+    } catch {
+      // listExtensions 已确认 manifest 可读；此处失败只可能是并发删除，回退旧脚本。
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/** 旧安装脚本；release 不存在或脚本缺失时返回 undefined（不抛异常）。 */
+function legacyCliPath(root: string): string | undefined {
+  try {
+    const cli = path.join(releaseDir(root), "scripts", "backends", "cli.mjs");
+    return exists(cli) ? cli : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 安装/卸载 facade。
+ *
+ * 解析顺序：
+ * 1. 已安装 manifest 的 backends（id / aliases）→ runPluginSetup；
+ * 2. `scripts/backends/cli.mjs` → 旧子进程转发（name 原样）；
+ * 3. 都没有 → PLUGIN_UNKNOWN / 退出码 4。
+ *
+ * 成功路径保持旧行为：整栈重启。
+ */
 export async function pluginAction(options: PluginActionOptions): Promise<PluginActionResult> {
   const { root, reporter } = options;
-  const name = assertPluginName(options.name);
-  const release = releaseDir(root);
-  const cli = path.join(release, "scripts", "backends", "cli.mjs");
-  if (!exists(cli)) {
-    throw new CliError("PLUGIN_FAILED", EXIT.FAIL, `未找到插件安装器：${cli}`);
+  const verb = options.action === "install" ? "安装" : "卸载";
+
+  const match = findBackendMatch(root, options.name);
+  if (match) {
+    const setup = options.setup ?? runPluginSetup;
+    const result = await setup({
+      root,
+      entry: match.manifest.entry,
+      action: options.action,
+      plugin: {
+        id: match.manifest.id,
+        name: match.manifest.name,
+        version: match.manifest.version,
+      },
+      backends: [match.backend.id],
+      configSchema: match.manifest.config_schema,
+      onLog: (message) =>
+        reporter.event({ event: "log", service: options.name, message }),
+    });
+
+    if (!result.ok) {
+      throw new CliError(
+        "PLUGIN_FAILED",
+        EXIT.FAIL,
+        `${options.name} ${verb}失败：${result.error ?? "setup 未返回错误详情"}`,
+      );
+    }
+
+    const restart = options.restart ?? restartForConfig;
+    await restart(root, reporter);
+
+    return {
+      name: options.name,
+      action: options.action,
+      restarted: true,
+      source: "extension",
+      plugin_id: match.manifest.id,
+      backend_id: match.backend.id,
+    };
   }
 
-  const args = [cli, name, options.action, "--root", root, "--json"];
+  const cli = legacyCliPath(root);
+  if (!cli) {
+    throw new CliError(
+      "PLUGIN_UNKNOWN",
+      EXIT.INVALID,
+      `未知插件：${options.name}。请使用 asg extensions install <owner/repo> 安装插件。`,
+    );
+  }
+
+  const args = [cli, options.name, options.action, "--root", root, "--json"];
   const runner = options.runner ?? spawnStream;
   const result = await runner(nodePath(root), args, {
     cwd: root,
     env: process.env,
-    onLine: (line) => forwardChildLine(reporter, line, name),
+    onLine: (line) => forwardChildLine(reporter, line, options.name),
   });
 
   if (result.error || result.code !== 0) {
-    const previous = path.relative(root, pluginPreviousFile(root, name));
+    const previous = path.relative(
+      root,
+      path.join(backendsDir(root), options.name, "previous.json"),
+    );
     const detail = result.error
       ? result.error
       : result.code === null
@@ -324,13 +460,18 @@ export async function pluginAction(options: PluginActionOptions): Promise<Plugin
     throw new CliError(
       "PLUGIN_FAILED",
       EXIT.FAIL,
-      `${name} ${options.action === "install" ? "安装" : "卸载"}失败（${detail}）；未自动回滚。原配置备份：${previous}`,
-      { plugin: name, action: options.action, previous },
+      `${options.name} ${verb}失败（${detail}）；未自动回滚。原配置备份：${previous}`,
+      { plugin: options.name, action: options.action, previous },
     );
   }
 
   const restart = options.restart ?? restartForConfig;
   await restart(root, reporter);
 
-  return { name, action: options.action, restarted: true };
+  return {
+    name: options.name,
+    action: options.action,
+    restarted: true,
+    source: "legacy",
+  };
 }

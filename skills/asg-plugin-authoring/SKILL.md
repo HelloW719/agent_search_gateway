@@ -13,14 +13,17 @@ description: 为 agent-search-gateway（asg）编写、迁移或发布第三方�
 - 用户要为某个站点写 **取件插件**（`fetch`），例如接管 `example.com/article/...`。
 - 用户要为某个来源写 **搜索源 / 图搜源**（`engine`），例如新增 `gateway.search` 文本源。
 - 用户要把网关里的内置实现迁出成独立插件仓库。
+- 用户要给插件增加独立后端（服务、CLI、浏览器依赖），让插件自己安装/卸载。
 - 用户要发布插件（`asg-plugin.json` + `index.mjs` + `SHA256SUMS`）。
 
 ## 0. 运行期契约（先记住这几条）
 
-1. 插件入口是**单文件 ESM**（默认 `index.mjs`），只认两个命名导出：
+1. 插件入口是**单文件 ESM**（默认 `index.mjs`），只认三个命名导出：
    - `export const fetch`：取件插件（`FetchPlugin` 形状）；
    - `export const engine`：引擎 provider（`EngineProvider` 形状）；
-   - 两者可在同一文件同时导出（`provides: ["search", "fetch"]`）。
+   - `export async function setup(ctx)`：可选；插件自管后端时使用，只在 CLI
+     安装/更新/卸载时执行，网关运行时不调用。
+   - 前两者可在同一文件同时导出（`provides: ["search", "fetch"]`）。
 2. **禁止** `import "agent-search-gateway"` 或其内部模块（`src/...`）。运行期不保证宿主
    `node_modules` 存在，也不保证内部路径稳定。只允许：
    - Node 内置模块（`node:*`，esbuild 里保持 external）；
@@ -30,8 +33,9 @@ description: 为 agent-search-gateway（asg）编写、迁移或发布第三方�
    （会被同名绑定遮蔽）。把实现放到 `src/plugin.ts`，入口只做再导出。
 4. 类型可以自由复制：建 `src/sdk/`，把需要的契约类型与运行期工具（`runCliProcess`、
    `Semaphore`、通道常量等）复制进去，不要从宿主 import。
-5. `asg-plugin.json` 是**严格校验**的：只允许 `id/name/version/api_version/provides/entry/platform/description/config_schema`，
-   多一个字段都会校验失败。
+5. `asg-plugin.json` 是**严格校验**的：只允许 `id/name/version/api_version/provides/entry/platform/description/backends/config_schema`，
+   多一个字段都会校验失败。`api_version` 只接受 `1` / `2`；声明非空 `backends` 必须
+   是 `2`。
 6. 从 **0.3.4** 起，网关内置的 `bilibili` / `weibo` / `cnki` 已迁出为官方插件仓库，
    用户需要安装官方插件（见文末）而不是依赖内置实现。旧版本（≤0.3.3）会把这些 id
    当作内置能力拒绝安装，先升级网关。
@@ -163,9 +167,10 @@ asg extensions secret <id> --name <name> --stdin
 ├── LICENSE                   # MIT
 ├── README.md                 # 能力、配置、安装、发版
 ├── src/
-│   ├── index.ts              # 只导出 fetch / engine
+│   ├── index.ts              # 只导出 fetch / engine / setup
 │   ├── plugin.ts             # fetch 实现（可拆成多文件）
 │   ├── engine.ts             # engine 实现（可选）
+│   ├── setup.ts              # 后端安装/卸载（可选，需 api_version: 2）
 │   └── sdk/                  # 复制的契约类型与工具
 ├── test/
 │   ├── exports.test.ts
@@ -452,7 +457,92 @@ npm test        # build + vitest + node --test
 - 密钥、网络、登录态都从 `ctx` 注入，测试里直接构造设置对象，不依赖网关的 settings loader；
 - 需要指向本地桩服务器时，把端点/策略导出成可变对象（如 `endpoints`、`policy`），测试里改写。
 
-## 6. CI 发布（tag `v*`）
+## 6. 后端与 `setup`（可选，`api_version: 2`）
+
+插件需要独立服务、CLI、浏览器依赖等后端时，不要在核心仓库里加安装脚本，也不要让
+用户手工下载。做法是：
+
+1. manifest 升到 `api_version: 2`，声明 `backends`（只写身份，不写下载地址/版本）：
+
+```json
+{
+  "id": "example-plugin",
+  "name": "Example Plugin",
+  "version": "0.1.0",
+  "api_version": 2,
+  "provides": ["fetch"],
+  "entry": "index.mjs",
+  "backends": [
+    { "id": "example-api", "name": "Example API", "aliases": ["example-service"] },
+    { "id": "example-cli", "name": "Example CLI" }
+  ]
+}
+```
+
+2. 在入口（或再导出）实现 `setup(ctx)`：
+
+```ts
+import path from "node:path";
+
+export async function setup(ctx) {
+  const id = "example-cli";
+  const target = ctx.paths.backendDir(id);
+  const executable = path.join(target, "example-cli");
+
+  if (ctx.action === "status") {
+    return { installed: await ctx.exists(executable) };
+  }
+  if (ctx.action === "uninstall") {
+    await ctx.remove(target, { recursive: true, force: true });
+    await ctx.backendState.clear(id);
+    return { removed: true };
+  }
+  if (await ctx.exists(executable)) {
+    return { installed: true, reused: true };
+  }
+
+  await ctx.mkdir(target, { recursive: true });
+  const legacy = ctx.paths.legacyBackendDir(id);
+  if (await ctx.exists(legacy)) {
+    await ctx.copy(legacy, target); // 旧目录只读：只复制，不移动/删除
+  }
+  if (!(await ctx.exists(executable))) {
+    const archive = path.join(ctx.paths.tempDir, "example-cli.tar.gz");
+    await ctx.download("https://example.com/releases/example-cli.tar.gz", archive, {
+      sha256: "<64 位十六进制 sha256>",
+    });
+    await ctx.extract(archive, target, { stripComponents: 1 });
+  }
+  const version = await ctx.run(executable, ["--version"], { cwd: target });
+  if (version.code !== 0) throw new Error(version.stderr || version.stdout);
+  await ctx.backendState.write(id, {
+    installed: true,
+    enabled: true,
+    version: version.stdout.trim(),
+    path: target,
+  });
+  return { installed: true, version: version.stdout.trim() };
+}
+```
+
+关键约束：
+
+- `ctx.paths.dataDir` 是 `data/extension-data/<id>`，是插件唯一可写数据目录；
+  `ctx.paths.backendDir(id)` 在其中；更新插件目录不会丢后端。
+- 写操作只能落在 `dataDir` / `tempDir`；`pluginDir` 与 `ctx.paths.legacyBackendDir(id)`
+  只能读。旧 `data/backends` 只复制，不移动、不删除。
+- `ctx.download` / `fetchText` / `fetchJson` 只接受 https；`download` 提供 `sha256` 时会
+  校验，不匹配删除文件；需要单独校验已有文件时用 `ctx.sha256(file)`。
+- `ctx.config` 只写 `extensions.<id>.config`，按 `config_schema` 校验；失败不落盘。
+- `ctx.backendState` 写 `data/extension-data/<id>/backends.json`，`asg extensions list`
+  只读它展示 `BACKENDS`。
+- action 为 `install` / `update` / `uninstall` / `status`；当前 CLI 会传
+  `install` / `status` / `uninstall`，`update` 是预留。所有 action 都要幂等、可重跑。
+- 整次 setup 默认超时 10 分钟；子进程**不是安全沙箱**。不要 import 网关内部模块。
+
+完整契约与示例见 [`references/setup.md`](references/setup.md)。
+
+## 7. CI 发布（tag `v*`）
 
 `.github/workflows/release.yml`：
 
@@ -495,15 +585,18 @@ jobs:
 `version` 必须与 tag 去掉 `v` 后一致；安装器会校验 `SHA256SUMS`，不要手工替换资产。
 细节见 `references/release.md`。
 
-## 7. 发现与安装
+## 8. 发现与安装
 
 - 给 GitHub 仓库加 topic：**`asg-plugin`**（`asg extensions search` 依赖它）；
 - 用户安装：
 
 ```bash
-asg extensions install <owner>/<repo>@0.1.0
-asg extensions list
+asg extensions install <owner>/<repo>@0.1.0   # 默认执行 manifest 声明的后端 setup
+asg extensions list                           # BACKENDS 列显示后端状态
+asg extensions setup <id> --status
 ```
+
+安装完成不会自动重启网关；`config` / `secret` 写入才会整栈重启。
 
 官方插件仓库：
 
@@ -513,9 +606,13 @@ asg extensions install djasdh/agent-search-gateway-plugin-weibo@0.1.0
 asg extensions install djasdh/agent-search-gateway-plugin-cnki@0.1.0
 ```
 
-## 8. 交付前检查清单
+## 9. 交付前检查清单
 
 - [ ] `src/index.ts` 导出 `fetch`（以及需要时的 `engine`），且没有遮蔽全局 `fetch`；
+- [ ] 有后端时导出 `setup`，`api_version: 2`，`backends[].id` / `name` / `aliases` 合法；
+- [ ] `setup` 的 `install` / `status` / `uninstall` 都能重复执行，已安装时不会重复下载；
+- [ ] setup 只写 `ctx.paths.backendDir(id)` / `tempDir`，旧 `data/backends` 只复制不删除；
+- [ ] setup 的下载用 https + `sha256`，解压/命令失败会抛错；
 - [ ] `match` 只做 URL 判断，不读配置、不发请求、不抛错；
 - [ ] 没有 import `agent-search-gateway` 或宿主 `node_modules`；
 - [ ] 私有配置已写进 `config_schema`，字段名 snake_case，每个字段有 `description`，
@@ -523,16 +620,17 @@ asg extensions install djasdh/agent-search-gateway-plugin-cnki@0.1.0
 - [ ] 插件只读 `ctx.pluginConfig` / `ctx.pluginSecrets`，没有依赖 `ctx.settings` / `ctx.config`；
 - [ ] 密钥没有放进 `config`，而是走 `asg extensions secret`；
 - [ ] `package.json` 无运行期依赖，`npm run build` 只产出 `index.mjs`；
-- [ ] `asg-plugin.json` 只有允许字段，`api_version: 1`，`version` 与 tag 一致；
+- [ ] `asg-plugin.json` 只有允许字段，`api_version` 为 `1` 或 `2`，`version` 与 tag 一致；
 - [ ] `asg-plugin.json`、`package.json` 版本同步；
-- [ ] `npm run typecheck`、`npm test` 通过；
+- [ ] `npm run typecheck`、`npm test` 通过（含 setup 幂等与旧目录迁移测试）；
 - [ ] `.github/workflows/release.yml` 用 `contents: write` 并上传三个资产；
-- [ ] README 写明能力、配置、安装命令与发版步骤；
+- [ ] README 写明能力、配置、安装命令、后端安装/卸载与发版步骤；
 - [ ] GitHub topic `asg-plugin` 已设置（发布后手动加）。
 
 ## 参考文件
 
-- `references/manifest.md`：manifest 字段、校验规则、安装目录与资产。
+- `references/manifest.md`：manifest 字段、`api_version` 1/2、`backends`、校验规则、安装目录与资产。
+- `references/setup.md`：`setup(ctx)` 完整契约、路径/API、幂等与旧目录迁移。
 - `references/fetch-plugin.md`：`FetchPlugin` 全字段、结果形状、上下文与错误约定。
 - `references/search-engine.md`：`EngineProvider` 两种 runtime、routing/plan 语义、返回结构。
 - `references/release.md`：构建、发布、安装器行为与常见坑。

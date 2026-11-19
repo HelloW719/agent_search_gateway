@@ -10,14 +10,18 @@
 | `id` | 是 | 3–64 位小写字母/数字/`.` `_` `-`，首尾必须是字母或数字；也是安装目录名 |
 | `name` | 是 | 1–80 个字符的展示名 |
 | `version` | 是 | 语义化版本 `\d+\.\d+\.\d+(-预发布)?`；必须与 Release tag 去掉 `v` 后一致 |
-| `api_version` | 是 | 当前只接受字面量 `1` |
+| `api_version` | 是 | `1` 或 `2` |
 | `provides` | 是 | 非空数组，元素只能是 `"search"` / `"fetch"`，不能重复 |
 | `entry` | 是 | 单个 `.mjs` / `.js` 文件名；不能含 `/`、`\`、`..`、`:`，不能是绝对路径 |
 | `platform` | 否 | 小写字母/数字/`-`；作为 fetch 插件平台回退，缺省用 `id` |
 | `description` | 否 | 任意字符串（建议一句话说明能力） |
+| `backends` | 否 | 后端声明数组；非空时必须 `api_version: 2`，见下文 |
 | `config_schema` | 否 | 插件私有配置声明（JSON Schema 子集，见下文）；省略时 `config` 原样透传 |
 
-## 示例
+`api_version: 1` 的插件不能声明非空 `backends`；`"backends": []` 等价于未声明。
+manifest 与 `backends[]` 都是严格对象，任何未知字段都会让校验失败。
+
+## 示例（无后端）
 
 ```json
 {
@@ -31,19 +35,79 @@
 }
 ```
 
-同时提供搜索源与取件：
+同时提供搜索源与取件（仍不需要后端）：
 
 ```json
 {
-  "id": "weibo",
-  "name": "Weibo",
+  "id": "example-plugin",
+  "name": "Example Plugin",
   "version": "0.1.0",
   "api_version": 1,
   "provides": ["search", "fetch"],
   "entry": "index.mjs",
-  "description": "微博取件 + weibo / weibo_hot 搜索源"
+  "description": "示例搜索源 + 取件"
 }
 ```
+
+## 后端声明（`backends`，`api_version: 2`）
+
+插件需要独立服务、CLI、浏览器依赖等后端时，在 manifest 里声明身份，并在入口导出
+`setup(ctx)` 自己安装。`backends` 只是元数据，不包含代码、下载地址或版本。
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `id` | 是 | 3–64 位小写字母/数字/`.` `_` `-`，首尾必须是字母或数字；同一插件内唯一 |
+| `name` | 是 | 1–80 个字符的展示名 |
+| `description` | 否 | 任意字符串 |
+| `aliases` | 否 | 旧 `asg plugins` 输入名数组；元素非空且不重复 |
+
+```json
+{
+  "id": "example-plugin",
+  "name": "Example Plugin",
+  "version": "0.1.0",
+  "api_version": 2,
+  "provides": ["fetch"],
+  "entry": "index.mjs",
+  "description": "示例：自管 example-api / example-cli",
+  "backends": [
+    {
+      "id": "example-api",
+      "name": "Example API",
+      "description": "示例 HTTP 服务",
+      "aliases": ["example-service"]
+    },
+    {
+      "id": "example-cli",
+      "name": "Example CLI",
+      "description": "示例命令行工具"
+    }
+  ]
+}
+```
+
+- `aliases` 只用于兼容旧输入名：`asg plugins install <name>` / `remove <name>`
+  会按 `backend.id` 或 `aliases` 精确匹配，命中后走同一套 setup。
+- 新插件不要用旧名作为主标识；声明稳定的 `backend.id`。
+- 声明了 `backends` 就应导出 `setup`；否则 `asg extensions install` / `setup <id>`
+  会因“入口没有导出 setup 函数”失败（可以 `--no-setup` 先安装，修好后再 setup）。
+- `update` action 是契约预留；当前 CLI 升级插件时传的是 `install`，插件应按幂等方式
+  处理 `install` / `update`，不要假设 `update` 一定会出现。
+- 完整上下文、路径与 API 见 [`setup.md`](setup.md)。
+
+## provides 与命名导出的对应关系
+
+| `provides` | 运行期从 `entry` 读取的导出 |
+| --- | --- |
+| `["fetch"]` | `fetch` |
+| `["search"]` | `engine` |
+| `["search", "fetch"]` | `engine` 与 `fetch` 同时存在 |
+
+`setup` 是独立的可选导出，不属于 `provides`；网关运行时不调用它。
+
+导出名写错时，安装本身可能成功（安装层只校验资产与 manifest），但运行期加载会
+失败或该能力不生效，因此务必在测试里断言导出形状；声明了 `backends` 时还要测试
+`setup` 导出与幂等。
 
 ## 私有配置：`config_schema`
 
@@ -101,40 +165,33 @@ asg extensions secret <id> --name api_key --stdin
 写入前校验，失败不落盘；成功后整栈重启。默认值只在运行期补齐，不写回文件。
 **密钥不要放进 `config`**，一律用 `secrets.yaml → extensions.<id>.<name>`。
 
+setup 里可以用 `ctx.config.get/patch/replace/unset` 读写同一段配置；规则、校验与
+“失败不落盘”与 CLI 一致。详见 [`setup.md`](setup.md)。
+
 字段命名规范见 `../SKILL.md` 的“插件私有配置”一节：统一 snake_case，
 `enabled` / `base_url` / `timeout_ms` / `limit` / `categories` / `mode` / `user_agent`，
 单位写进后缀，布尔用肯定式。
 
-## provides 与命名导出的对应关系
+## 安装目录、数据目录与资产
 
-| `provides` | 运行期从 `entry` 读取的导出 |
-| --- | --- |
-| `["fetch"]` | `fetch` |
-| `["search"]` | `engine` |
-| `["search", "fetch"]` | `engine` 与 `fetch` 同时存在 |
-
-导出名写错时，安装本身可能成功（当前安装层只校验资产与 manifest），但运行期加载会
-失败或该能力不生效，因此务必在测试里断言导出形状。
-
-## 安装目录与状态
-
-- 安装根目录：`<root>/data/extensions/<id>/`，目录名必须与 `id` 一致；
+- 安装目录：`<root>/data/extensions/<id>/`，目录名必须与 `id` 一致；
 - 目录存在即视为已安装，没有额外注册表；
 - 安装时先下载到 `.staging-*`，成功后原子换入；旧目录进 `.trash-*`；
-- 卸载只删目录，不改 `gateway.yaml` / `secrets.yaml`。
-
-## 资产
+- 插件可写数据：`<root>/data/extension-data/<id>/`，**更新插件不会覆盖**；
+- 旧后端目录 `<root>/data/backends/<name>/` 只读，只能复制、不能移动/删除；
+- 卸载只删插件目录；`asg extensions remove` 默认还会删 `data/extension-data/<id>`，
+  `--keep-data` 保留，`--force` 跳过卸载 setup。
 
 一个 Release 至少包含：
 
 | 资产 | 说明 |
 | --- | --- |
 | `asg-plugin.json` | manifest 本体 |
-| `index.mjs`（或 `entry` 指定的文件） | 单文件 ESM，不能依赖同目录其它文件 |
+| `index.mjs`（或 `entry` 指定的文件） | 单文件 ESM，不能依赖同目录其它文件；可同时导出 `fetch` / `engine` / `setup` |
 | `SHA256SUMS` | `sha256sum` 格式，必须覆盖前两者 |
 
 安装器只接受 **https** 下载地址，并会先校验 manifest，再按 `SHA256SUMS` 校验两个文件；
-校验失败立即清理 staging。
+校验失败立即清理 staging。安装成功后默认执行后端 setup（`--no-setup` 可跳过）。
 
 ## 版本与内置 id 注意事项
 
