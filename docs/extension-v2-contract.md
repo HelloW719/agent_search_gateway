@@ -1,9 +1,11 @@
-# Extension V2 接口契约（草案）
+# Extension V2 接口契约（目标）
 
-- 状态：草案，待审
-- 目标：0.4.0 最终态
-- 过渡：0.3.x 同时接受 V1 / V2
-- 本文只定义接口，不定义实现文件
+- 状态：目标契约，分阶段实现
+- 当前过渡版：只实现 V2 manifest 字段与 `extensions` 命令展示；V2 runtime 未启用
+- 下一版：实现 V2 runtime
+- 再下一版：启用 V2
+- 最后：只保留 V2，V1 直接报错
+- 本文描述最终接口，不代表当前版本已经实现
 
 ---
 
@@ -871,7 +873,7 @@ data/extension-data/<id>/          V2 数据
 data/backends/<name>/              V1 旧后端，只读迁移源
 ```
 
-- `data/extension-data` 是 P1 草稿命名，P1 提交前改为 `extension-data`，不留兼容。
+- `data/extension-data` 是最终命名；旧的 `data/plugin-data` 不再使用。
 - V2 setup 可读取 `data/backends`，复制到 `extension-data/<id>/backends/<backend-id>`。
 - 不移动、不删除旧目录。
 
@@ -978,5 +980,5 @@ interface MigrationChecklist {
 1. 官方插件 v0.2.0 尚未发布，真实清单和 config 映射无法填。
 2. 如果 v0.2.0 硬依赖 0.4.0，迁移顺序需调整。
 3. 官方 v0.2.0 manifest 必须遵守“backend 不跨 channel 共用”。
-4. 平台无关清理范围大，需区分 P2 建立边界与 0.4.x 实际迁出。
-5. 迁移命令必须能在网关启动前离线运行。
+4. 平台无关清理范围大，需区分过渡版边界与 0.4.x 实际迁出。
+5. 是否需要在网关启动前离线迁移，取决于后续版本是否放宽旧配置解析。

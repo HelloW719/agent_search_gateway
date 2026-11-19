@@ -229,6 +229,46 @@ describe("asg extensions list", () => {
     });
   });
 
+  it("V2 输出 backends / fetch_channels / search_engines", async () => {
+    const root = tempRoot();
+    const target = path.join(root, "data", "extensions", "demo-v2");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(
+      path.join(target, "asg-extension.json"),
+      JSON.stringify({
+        id: "demo-v2",
+        name: "Demo V2",
+        version: "2.0.0",
+        api_version: 2,
+        provides: ["fetch", "search"],
+        entry: "index.mjs",
+        backends: [{ id: "demo-api", name: "Demo API" }],
+        fetch_channels: [
+          { id: "example:cli", name: "Example CLI", backends: ["demo-api"] },
+        ],
+        search_engines: [{ id: "gateway.search:example", name: "Example Search" }],
+      }),
+      "utf8",
+    );
+
+    const result = await run({ root, reporter: fakeReporter(), rest: ["list"] });
+
+    expect(result.human).toContain("CHANNELS");
+    expect(result.human).toContain("ENGINES");
+    expect(result.human).toContain("example:cli");
+    expect(result.human).toContain("gateway.search:example");
+    expect(result.data).toMatchObject({
+      extensions: [
+        {
+          id: "demo-v2",
+          backends: [{ id: "demo-api", name: "Demo API" }],
+          fetch_channels: [{ id: "example:cli" }],
+          search_engines: [{ id: "gateway.search:example" }],
+        },
+      ],
+    });
+  });
+
   it("空目录给出提示", async () => {
     const result = await run({ root: tempRoot(), reporter: fakeReporter(), rest: ["list"] });
     expect(result.human).toContain("未安装任何第三方插件");

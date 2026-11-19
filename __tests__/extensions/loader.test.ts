@@ -313,7 +313,7 @@ describe("坏包隔离与校验", () => {
     });
   });
 
-  it("api_version 2 + backends 正常加载，api 1 不受影响", async () => {
+  it("api_version 2 本版本跳过加载，api 1 不受影响", async () => {
     const root = tempRoot();
     writeExtension(
       root,
@@ -334,9 +334,11 @@ describe("坏包隔离与校验", () => {
     );
     writeExtension(root, "demo-v1", manifest({ id: "demo-v1" }), FETCH_ENTRY);
 
-    const loaded = await loadExtensions(root);
+    const warnings: string[] = [];
+    const loaded = await loadExtensions(root, { logger: fakeLogger(warnings) });
     expect(loaded.errors).toEqual([]);
-    expect(loaded.fetch.map((plugin) => plugin.id)).toEqual(["demo-v1", "demo-v2"]);
+    expect(loaded.fetch.map((plugin) => plugin.id)).toEqual(["demo-v1"]);
+    expect(warnings.join("\n")).toContain("V2 manifest");
   });
 
   it("缺少 manifest / 条目导入失败时只记录对应错误", async () => {

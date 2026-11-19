@@ -478,7 +478,7 @@ asg plugins remove <name>
 
 解析顺序：
 
-1. 在 `data/extensions/*/asg-plugin.json` 的 `backends[]` 中按 `backend.id` 或
+1. 在 `data/extensions/*/asg-plugin.json`（仅 V1）的 `backends[]` 中按 `backend.id` 或
    `aliases` 精确匹配；命中后对对应后端执行 setup（`install` / `uninstall`），
    成功后整栈重启；
 2. 未命中时回退旧的 `scripts/backends/cli.mjs <name> <action> --root <ROOT> --json`，
@@ -530,11 +530,12 @@ asg extensions config <id> [--get [key]] [--set key=value]... [--unset key]... [
 asg extensions secret <id> --name <name> --stdin | --clear
 ```
 
-- 插件在 `asg-plugin.json` 里声明 `provides`（`search` / `fetch` / 两者）；
-  `api_version: 2` 时还可以声明 `backends`（`id` / `name` / `description` / `aliases`）。
-  `api_version: 1` 不得声明非空 `backends`；未知字段会被拒绝。
-- 安装包为单文件 ESM：Release 资产包含 `asg-plugin.json`、`entry` 指向的文件与 `SHA256SUMS`；
-  入口可以额外导出 `setup(ctx)`。
+- manifest 文件优先 `asg-extension.json`（V2），缺失时回退 `asg-plugin.json`（V1）。
+- V2 字段：`backends` / `fetch_channels` / `search_engines`；V1 保持旧字段。
+  本版本不做严格校验：未知字段忽略。
+- 本版本 V2 只用于安装与 `extensions list` 展示，运行时跳过；V1 仍是唯一加载路径。
+- 安装包为单文件 ESM：Release 资产包含实际选中的 manifest、`entry` 指向的文件与
+  `SHA256SUMS`；入口可以额外导出 `setup(ctx)`。
 - 安装目录 `<ROOT>/data/extensions/<id>/`，目录存在即视为已安装；插件可写数据在
   `<ROOT>/data/extension-data/<id>/`，更新插件不会覆盖。`data/backends` 是旧目录，
   只作为迁移读取源，CLI 不会删除。
@@ -551,8 +552,9 @@ asg extensions secret <id> --name <name> --stdin | --clear
   `data/extension-data/<id>`，`--keep-data` 保留。
 - `install` / `setup` / `remove` **不会自动重启**；需要重启网关（`asg restart`）
   或下次运行 `asg engines` 时生效。
-- `list` 表格列为 `ID / VERSION / PROVIDES / BACKENDS / ENTRY`；`BACKENDS` 渲染为
-  `<id>@<version>` / `<id>` / `<id>(未安装)`，无后端显示 `-`。读取
+- `list` 表格列为 `ID / VERSION / PROVIDES / BACKENDS / CHANNELS / ENGINES / ENTRY`；
+  `BACKENDS` 渲染为 `<id>@<version>` / `<id>` / `<id>(未安装)`，无后端显示 `-`；
+  `CHANNELS` / `ENGINES` 输出 V2 声明，V1 显示 `-`。读取
   `data/extension-data/<id>/backends.json`，不执行插件代码；状态文件损坏只告警。
 - `config` 读写 `gateway.yaml → extensions.<id>.config`；`id` 是 manifest id，不是 engineId；
   `<id>` 必须指向已安装插件（未安装报 `PLUGIN_UNKNOWN`，manifest 损坏报 `PLUGIN_FAILED`）：
@@ -576,10 +578,23 @@ asg extensions secret <id> --name <name> --stdin | --clear
   "extensions": [
     {
       "id": "example-plugin",
-      "version": "0.1.0",
-      "provides": ["fetch"],
+      "version": "0.2.0",
+      "provides": ["fetch", "search"],
       "entry": "index.mjs",
       "path": "/path/to/root/data/extensions/example-plugin",
+      "fetch_channels": [
+        {
+          "id": "example:cli",
+          "name": "Example CLI",
+          "backends": ["example-api"]
+        }
+      ],
+      "search_engines": [
+        {
+          "id": "gateway.search:example",
+          "name": "Example Search"
+        }
+      ],
       "backends": [
         {
           "id": "example-api",

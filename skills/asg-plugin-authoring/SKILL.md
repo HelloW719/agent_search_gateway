@@ -1,6 +1,6 @@
 ---
 name: asg-plugin-authoring
-description: 为 agent-search-gateway（asg）编写、迁移或发布第三方插件时使用。适用于：从零生成一个 asg 插件仓库、把网关内置的 fetch/search 能力抽成独立插件、编写 asg-plugin.json、打包单文件 ESM（index.mjs）、补测试，以及配置 GitHub Actions 的 v* Release 与 asg-plugin topic。
+description: 为 agent-search-gateway（asg）编写、迁移或发布第三方插件时使用。适用于：从零生成一个 asg 插件仓库、把网关内置的 fetch/search 能力抽成独立插件、编写 asg-extension.json、打包单文件 ESM（index.mjs）、补测试，以及配置 GitHub Actions 的 v* Release 与 asg-plugin topic。
 ---
 
 # 编写 asg 第三方插件
@@ -14,7 +14,7 @@ description: 为 agent-search-gateway（asg）编写、迁移或发布第三方�
 - 用户要为某个来源写 **搜索源 / 图搜源**（`engine`），例如新增 `gateway.search` 文本源。
 - 用户要把网关里的内置实现迁出成独立插件仓库。
 - 用户要给插件增加独立后端（服务、CLI、浏览器依赖），让插件自己安装/卸载。
-- 用户要发布插件（`asg-plugin.json` + `index.mjs` + `SHA256SUMS`）。
+- 用户要发布插件（`asg-extension.json` + `index.mjs` + `SHA256SUMS`）。
 
 ## 0. 运行期契约（先记住这几条）
 
@@ -33,9 +33,9 @@ description: 为 agent-search-gateway（asg）编写、迁移或发布第三方�
    （会被同名绑定遮蔽）。把实现放到 `src/plugin.ts`，入口只做再导出。
 4. 类型可以自由复制：建 `src/sdk/`，把需要的契约类型与运行期工具（`runCliProcess`、
    `Semaphore`、通道常量等）复制进去，不要从宿主 import。
-5. `asg-plugin.json` 是**严格校验**的：只允许 `id/name/version/api_version/provides/entry/platform/description/backends/config_schema`，
-   多一个字段都会校验失败。`api_version` 只接受 `1` / `2`；声明非空 `backends` 必须
-   是 `2`。
+5. `asg-extension.json` 支持 `id/name/version/api_version/provides/entry/description/config_schema`，
+   `api_version: 2` 还可以写 `backends` / `fetch_channels` / `search_engines`。本版本
+   不做严格字段校验，未知字段忽略；V2 字段只用于安装与列表展示，运行时尚未启用。
 6. 从 **0.3.4** 起，网关内置的 `bilibili` / `weibo` / `cnki` 已迁出为官方插件仓库，
    用户需要安装官方插件（见文末）而不是依赖内置实现。旧版本（≤0.3.3）会把这些 id
    当作内置能力拒绝安装，先升级网关。
@@ -157,7 +157,7 @@ asg extensions secret <id> --name <name> --stdin
 
 ```text
 <repo>/
-├── asg-plugin.json           # manifest（严格字段）
+├── asg-extension.json           # manifest
 ├── package.json              # type: module；build / test / typecheck
 ├── package-lock.json         # npm install 生成，随提交
 ├── tsconfig.json
@@ -270,7 +270,7 @@ index.mjs
 SHA256SUMS
 ```
 
-### asg-plugin.json
+### asg-extension.json
 
 ```json
 {
@@ -566,21 +566,21 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: sha256sum index.mjs asg-plugin.json > SHA256SUMS
+      - run: sha256sum index.mjs asg-extension.json > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            index.mjs asg-plugin.json SHA256SUMS \
+            index.mjs asg-extension.json SHA256SUMS \
             --title "agent-search-gateway-plugin-example ${GITHUB_REF_NAME}" \
             --generate-notes
 ```
 
 发布步骤：
 
-1. 同时改 `asg-plugin.json` 与 `package.json` 的版本号；
+1. 同时改 `asg-extension.json` 与 `package.json` 的版本号；
 2. `git tag v0.1.0 && git push origin v0.1.0`；
-3. 等 Actions 创建 Release（资产：`index.mjs`、`asg-plugin.json`、`SHA256SUMS`）。
+3. 等 Actions 创建 Release（资产：`index.mjs`、`asg-extension.json`、`SHA256SUMS`）。
 
 `version` 必须与 tag 去掉 `v` 后一致；安装器会校验 `SHA256SUMS`，不要手工替换资产。
 细节见 `references/release.md`。
@@ -620,8 +620,8 @@ asg extensions install djasdh/agent-search-gateway-plugin-cnki@0.1.0
 - [ ] 插件只读 `ctx.pluginConfig` / `ctx.pluginSecrets`，没有依赖 `ctx.settings` / `ctx.config`；
 - [ ] 密钥没有放进 `config`，而是走 `asg extensions secret`；
 - [ ] `package.json` 无运行期依赖，`npm run build` 只产出 `index.mjs`；
-- [ ] `asg-plugin.json` 只有允许字段，`api_version` 为 `1` 或 `2`，`version` 与 tag 一致；
-- [ ] `asg-plugin.json`、`package.json` 版本同步；
+- [ ] `asg-extension.json` 的 `api_version` 为 `1` 或 `2`，`version` 与 tag 一致；
+- [ ] `asg-extension.json`、`package.json` 版本同步；
 - [ ] `npm run typecheck`、`npm test` 通过（含 setup 幂等与旧目录迁移测试）；
 - [ ] `.github/workflows/release.yml` 用 `contents: write` 并上传三个资产；
 - [ ] README 写明能力、配置、安装命令、后端安装/卸载与发版步骤；

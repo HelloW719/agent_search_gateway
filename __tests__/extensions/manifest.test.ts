@@ -44,11 +44,6 @@ describe("插件 manifest", () => {
     expect(() => parseManifest("{")).toThrow(/不是合法 JSON/);
   });
 
-  it("拒绝未知字段", () => {
-    expect(() => parseManifest(manifest({ extra: true }))).toThrow(/校验失败/);
-    expect(() => parseManifest(manifest({ extra: true }))).toThrow(/[Uu]nrecognized|extra/);
-  });
-
   it("校验 id 规则", () => {
     for (const id of ["ab", "ABC", "-abc", "abc-", ".abc", "a".repeat(65), "中文"]) {
       expect(() => parseManifest(manifest({ id })), id).toThrow(/id 必须/);
@@ -59,7 +54,6 @@ describe("插件 manifest", () => {
 
   it("校验 name 与 version", () => {
     expect(() => parseManifest(manifest({ name: "" }))).toThrow(/name/);
-    expect(() => parseManifest(manifest({ name: "x".repeat(81) }))).toThrow(/name/);
     expect(() => parseManifest(manifest({ version: "1.2" }))).toThrow(/version/);
     expect(() => parseManifest(manifest({ version: "v1.2.3" }))).toThrow(/version/);
     expect(isValidExtensionVersion("1.2.3-beta.1")).toBe(true);
@@ -72,9 +66,12 @@ describe("插件 manifest", () => {
     expect(() => parseManifest(manifest({ api_version: "1" }))).toThrow(/api_version/);
   });
 
-  it("provides 非空、不能重复、只能是 search/fetch", () => {
-    expect(() => parseManifest(manifest({ provides: [] }))).toThrow(/至少声明一项/);
-    expect(() => parseManifest(manifest({ provides: ["fetch", "fetch"] }))).toThrow(/重复/);
+  it("provides 只接受 search/fetch", () => {
+    expect(parseManifest(manifest({ provides: [] })).provides).toEqual([]);
+    expect(parseManifest(manifest({ provides: ["fetch", "fetch"] })).provides).toEqual([
+      "fetch",
+      "fetch",
+    ]);
     expect(() => parseManifest(manifest({ provides: ["other"] }))).toThrow(/provides/);
   });
 
@@ -117,24 +114,6 @@ describe("插件 manifest 的 backends（api_version 2）", () => {
     expect(parseManifest(manifest({ api_version: 2 }))).not.toHaveProperty("backends");
   });
 
-  it("api_version 1 不允许声明非空 backends", () => {
-    expect(() => parseManifest(manifest({ backends: [backend] }))).toThrow(/backends/);
-    expect(() => parseManifest(manifest({ backends: [backend] }))).toThrow(/api_version: 2/);
-    // 空数组不引入任何后端，兼容旧 manifest。
-    expect(parseManifest(manifest({ backends: [] })).backends).toEqual([]);
-  });
-
-  it("backends 不能有重复 id", () => {
-    expect(() =>
-      parseManifest(
-        manifest({
-          api_version: 2,
-          backends: [backend, { id: "demo-api", name: "另一个" }],
-        }),
-      ),
-    ).toThrow(/重复 id/);
-  });
-
   it("校验 backend id 规则", () => {
     for (const id of ["ab", "ABC", "-abc", "abc-", ".abc", "a".repeat(65), "中文"]) {
       expect(
@@ -144,49 +123,42 @@ describe("插件 manifest 的 backends（api_version 2）", () => {
     }
   });
 
-  it("校验 backend name 长度", () => {
+  it("校验 backend name 必填", () => {
     expect(() =>
       parseManifest(manifest({ api_version: 2, backends: [{ id: "demo-api", name: "" }] })),
     ).toThrow(/backends\[\]\.name/);
-    expect(() =>
-      parseManifest(
-        manifest({ api_version: 2, backends: [{ id: "demo-api", name: "x".repeat(81) }] }),
-      ),
-    ).toThrow(/backends\[\]\.name/);
   });
 
-  it("aliases 不能包含空串或重复项", () => {
-    expect(() =>
-      parseManifest(
-        manifest({
-          api_version: 2,
-          backends: [{ ...backend, aliases: ["ok", ""] }],
-        }),
-      ),
-    ).toThrow(/aliases/);
-    expect(() =>
-      parseManifest(
-        manifest({
-          api_version: 2,
-          backends: [{ ...backend, aliases: ["same", "same"] }],
-        }),
-      ),
-    ).toThrow(/aliases/);
-  });
+});
 
-  it("backend 元素是严格对象", () => {
-    expect(() =>
-      parseManifest(manifest({ api_version: 2, backends: [{ ...backend, extra: true }] })),
-    ).toThrow(/[Uu]nrecognized|extra/);
-    expect(() => parseManifest(manifest({ api_version: 2, backends: ["demo-api"] }))).toThrow(
-      /backends/,
+describe("插件 manifest 的 fetch_channels 与 search_engines", () => {
+  it("V2 原样保留通道和搜索源", () => {
+    const parsed = parseManifest(
+      manifest({
+        api_version: 2,
+        fetch_channels: [
+          {
+            id: "example:cli",
+            name: "Example CLI",
+            description: "示例通道",
+            backends: ["demo-api"],
+            aliases: ["example"],
+          },
+        ],
+        search_engines: [
+          {
+            id: "gateway.search:example",
+            name: "Example Search",
+            description: "示例搜索源",
+          },
+        ],
+      }),
     );
-  });
-
-  it("顶层 manifest 的未知字段仍被拒绝", () => {
-    expect(() =>
-      parseManifest(manifest({ api_version: 2, backends: [backend], extra: true })),
-    ).toThrow(/[Uu]nrecognized|extra/);
+    expect(parsed.api_version).toBe(2);
+    if (parsed.api_version === 2) {
+      expect(parsed.fetch_channels).toHaveLength(1);
+      expect(parsed.search_engines).toHaveLength(1);
+    }
   });
 });
 

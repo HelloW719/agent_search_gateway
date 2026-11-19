@@ -26,15 +26,15 @@ npm run build        # esbuild → index.mjs
 
 ## 发布步骤
 
-1. **同步版本号**：`asg-plugin.json` 与 `package.json` 都改成 `0.1.0`；
+1. **同步版本号**：`asg-extension.json` 与 `package.json` 都改成 `0.1.0`；
 2. 提交：`git add -A && git commit -m "chore: release v0.1.0"`；
 3. 打 tag 并推送：`git tag v0.1.0 && git push origin v0.1.0`；
 4. CI 会执行 `npm ci` → `npm run typecheck` → `npm test` → `npm run build`，
    然后：
 
 ```bash
-sha256sum index.mjs asg-plugin.json > SHA256SUMS
-gh release create "$GITHUB_REF_NAME" index.mjs asg-plugin.json SHA256SUMS \
+sha256sum index.mjs asg-extension.json > SHA256SUMS
+gh release create "$GITHUB_REF_NAME" index.mjs asg-extension.json SHA256SUMS \
   --title "<repo> v0.1.0" --generate-notes
 ```
 
@@ -43,13 +43,13 @@ gh release create "$GITHUB_REF_NAME" index.mjs asg-plugin.json SHA256SUMS \
 | 资产 | 必需 | 说明 |
 | --- | --- | --- |
 | `index.mjs` | 是 | 单文件 ESM，文件名与 manifest `entry` 一致；可导出 `fetch` / `engine` / `setup` |
-| `asg-plugin.json` | 是 | manifest；有后端时 `api_version: 2` + `backends` |
+| `asg-extension.json` | 是 | manifest；有后端时 `api_version: 2` + `backends` |
 | `SHA256SUMS` | 是 | 覆盖上面两个文件 |
 
 安装器会：
 
 1. 解析 GitHub Release（`v<version>` 优先，回退 `<version>`，再回退 `latest`）；
-2. 下载并校验 `asg-plugin.json`；
+2. 下载并校验 `asg-extension.json`；
 3. 下载 `entry` 与 `SHA256SUMS`，逐个校验 sha256；
 4. 失败清理 staging，成功原子换入 `data/extensions/<id>/`；
 5. manifest 声明了非空 `backends` 时，默认执行 `setup(ctx)`（action=`install`，
@@ -94,7 +94,7 @@ asg extensions setup <id> [--status] [--uninstall]
 ## 发版检查
 
 - [ ] `npm run typecheck`、`npm test`、`npm run build` 全绿；
-- [ ] `asg-plugin.json`、`package.json` 版本一致且等于 tag（去掉 `v`）；
+- [ ] `asg-extension.json`、`package.json` 版本一致且等于 tag（去掉 `v`）；
 - [ ] Release 三个资产齐全，`SHA256SUMS` 可校验；
 - [ ] 有后端时 manifest 是 `api_version: 2`，`backends[].id` / `name` / `aliases` 合法；
 - [ ] 入口导出 `setup`，且 `install` / `status` / `uninstall` 可重复执行；

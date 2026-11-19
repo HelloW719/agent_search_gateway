@@ -13,16 +13,20 @@ import { download, fetchJson, sha256File } from "../../scripts/install/http.mjs"
 import { CliError, EXIT } from "../cli/errors.js";
 import { GATEWAY_VERSION } from "../version.js";
 import {
+  MANIFEST_FILE_NAMES,
+  V1_MANIFEST_FILE,
+  V2_MANIFEST_FILE,
   isValidEntryName,
   isValidExtensionId,
   isValidExtensionVersion,
   parseManifest,
   type ExtensionBackend,
+  type ExtensionFetchChannel,
   type ExtensionManifest,
   type ExtensionProvide,
+  type ExtensionSearchEngine,
 } from "./manifest.js";
 
-const MANIFEST_FILE = "asg-plugin.json";
 const CHECKSUMS_FILE = "SHA256SUMS";
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/;
 
@@ -59,6 +63,10 @@ export interface InstalledExtensionInfo {
   provides: ExtensionProvide[];
   /** manifest.backends；api_version 1 或未声明时为 []。 */
   backends: ExtensionBackend[];
+  /** manifest.fetch_channels；api_version 1 时为 []。 */
+  fetch_channels: ExtensionFetchChannel[];
+  /** manifest.search_engines；api_version 1 时为 []。 */
+  search_engines: ExtensionSearchEngine[];
   path: string;
 }
 
@@ -68,6 +76,8 @@ export interface InstalledExtension {
   version?: string;
   provides?: ExtensionProvide[];
   backends?: ExtensionBackend[];
+  fetch_channels?: ExtensionFetchChannel[];
+  search_engines?: ExtensionSearchEngine[];
   entry?: string;
   path: string;
   /** 单个安装目录损坏时只标记该条，不让整条 list 命令失败。 */
@@ -356,6 +366,18 @@ async function swapIntoPlace(
   return trash;
 }
 
+function declaredBackends(manifest: ExtensionManifest): ExtensionBackend[] {
+  return manifest.api_version === 2 ? (manifest.backends ?? []) : [];
+}
+
+function declaredFetchChannels(manifest: ExtensionManifest): ExtensionFetchChannel[] {
+  return manifest.api_version === 2 ? (manifest.fetch_channels ?? []) : [];
+}
+
+function declaredSearchEngines(manifest: ExtensionManifest): ExtensionSearchEngine[] {
+  return manifest.api_version === 2 ? (manifest.search_engines ?? []) : [];
+}
+
 export function extensionsDir(root: string): string {
   return path.join(root, "data", "extensions");
 }
@@ -391,14 +413,15 @@ export async function installExtension(
   const release = await resolveRelease(repo, version, deps, request);
   logger(`已找到 release ${release.tag}`);
 
-  const manifestUrl = release.assets.get(MANIFEST_FILE);
-  if (!manifestUrl) {
+  const manifestFile = MANIFEST_FILE_NAMES.find((name) => release.assets.has(name));
+  if (!manifestFile) {
     throw new CliError(
       "PLUGIN_FAILED",
       EXIT.INVALID,
-      `release ${release.tag} 缺少资产 ${MANIFEST_FILE}`,
+      `release ${release.tag} 缺少资产 ${V2_MANIFEST_FILE} 或 ${V1_MANIFEST_FILE}`,
     );
   }
+  const manifestUrl = release.assets.get(manifestFile)!;
   const checksumsUrl = release.assets.get(CHECKSUMS_FILE);
   if (!checksumsUrl) {
     throw new CliError(
@@ -418,18 +441,21 @@ export async function installExtension(
 
   try {
     await fsp.mkdir(pending, { recursive: false });
-    logger(`下载 ${MANIFEST_FILE}`);
+    logger(`下载 ${manifestFile}`);
     await downloadAsset(
       manifestUrl,
-      path.join(pending, MANIFEST_FILE),
-      MANIFEST_FILE,
+      path.join(pending, manifestFile),
+      manifestFile,
       deps,
       request,
     );
 
     let manifest: ExtensionManifest;
     try {
-      manifest = parseManifest(await fsp.readFile(path.join(pending, MANIFEST_FILE), "utf8"));
+      manifest = parseManifest(
+        await fsp.readFile(path.join(pending, manifestFile), "utf8"),
+        manifestFile,
+      );
     } catch (error) {
       throw new CliError(
         "PLUGIN_FAILED",
@@ -493,7 +519,7 @@ export async function installExtension(
     const checksums = parseChecksums(
       await fsp.readFile(path.join(staging, CHECKSUMS_FILE), "utf8"),
     );
-    await verifyChecksum(staging, MANIFEST_FILE, checksums, deps);
+    await verifyChecksum(staging, manifestFile, checksums, deps);
     await verifyChecksum(staging, manifest.entry, checksums, deps);
 
     const target = path.join(baseDir, manifest.id);
@@ -511,7 +537,9 @@ export async function installExtension(
       version: manifest.version,
       name: manifest.name,
       provides: manifest.provides,
-      backends: manifest.backends ?? [],
+      backends: declaredBackends(manifest),
+      fetch_channels: declaredFetchChannels(manifest),
+      search_engines: declaredSearchEngines(manifest),
       path: target,
     };
   } finally {
@@ -539,27 +567,32 @@ export function listExtensions(root: string): InstalledExtension[] {
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const dir = path.join(baseDir, entry.name);
-    const manifestPath = path.join(dir, MANIFEST_FILE);
+    const manifestFile = MANIFEST_FILE_NAMES.find((name) => fs.existsSync(path.join(dir, name)));
 
-    let text: string;
-    try {
-      text = fs.readFileSync(manifestPath, "utf8");
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
+    if (!manifestFile) {
       items.push({
         id: entry.name,
         path: dir,
-        error:
-          code === "ENOENT"
-            ? `未找到 ${MANIFEST_FILE}`
-            : `无法读取 ${MANIFEST_FILE}：${messageOf(error)}`,
+        error: `未找到 ${V2_MANIFEST_FILE} 或 ${V1_MANIFEST_FILE}`,
+      });
+      continue;
+    }
+
+    let text: string;
+    try {
+      text = fs.readFileSync(path.join(dir, manifestFile), "utf8");
+    } catch (error) {
+      items.push({
+        id: entry.name,
+        path: dir,
+        error: `无法读取 ${manifestFile}：${messageOf(error)}`,
       });
       continue;
     }
 
     let manifest: ExtensionManifest;
     try {
-      manifest = parseManifest(text);
+      manifest = parseManifest(text, manifestFile);
     } catch (error) {
       items.push({ id: entry.name, path: dir, error: messageOf(error) });
       continue;
@@ -570,7 +603,9 @@ export function listExtensions(root: string): InstalledExtension[] {
       name: manifest.name,
       version: manifest.version,
       provides: manifest.provides,
-      backends: manifest.backends ?? [],
+      backends: declaredBackends(manifest),
+      fetch_channels: declaredFetchChannels(manifest),
+      search_engines: declaredSearchEngines(manifest),
       entry: manifest.entry,
       path: dir,
     };
@@ -595,16 +630,15 @@ export function loadInstalledManifest(root: string, id: string): ExtensionManife
   }
 
   const dir = path.join(extensionsDir(root), id);
-  const manifestPath = path.join(dir, MANIFEST_FILE);
+  const manifestFile = MANIFEST_FILE_NAMES.find((name) => fs.existsSync(path.join(dir, name)));
+  if (!manifestFile) {
+    throw new CliError("PLUGIN_UNKNOWN", EXIT.MISSING, `未安装插件：${id}`);
+  }
 
   let text: string;
   try {
-    text = fs.readFileSync(manifestPath, "utf8");
+    text = fs.readFileSync(path.join(dir, manifestFile), "utf8");
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      throw new CliError("PLUGIN_UNKNOWN", EXIT.MISSING, `未安装插件：${id}`);
-    }
     throw new CliError(
       "PLUGIN_FAILED",
       EXIT.INVALID,
@@ -614,7 +648,7 @@ export function loadInstalledManifest(root: string, id: string): ExtensionManife
 
   let manifest: ExtensionManifest;
   try {
-    manifest = parseManifest(text);
+    manifest = parseManifest(text, manifestFile);
   } catch (error) {
     throw new CliError(
       "PLUGIN_FAILED",

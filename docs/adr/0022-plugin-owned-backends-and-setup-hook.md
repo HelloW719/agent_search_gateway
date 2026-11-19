@@ -42,9 +42,8 @@ CLI 或浏览器依赖仍没有统一的安装生命周期。把后端继续留�
    }
    ```
 
-   - `backends` 非空时必须 `api_version: 2`；`api_version: 1` 不得声明非空 `backends`。
-   - manifest 与每个 backend 条目都严格校验，未知字段直接拒绝；同一插件的 backend id
-     不能重复。
+   - `backends` 只属于 `api_version: 2`。
+   - 过渡版（本文之后）取消了严格字段校验：未知字段忽略，不再检查 backend id 重复。
    - `aliases` 只用于兼容 `asg plugins` 的旧输入名，不是新的安装命令。
    - `backends` 只描述身份，不承载代码、下载地址或版本；核心不内置任何平台名。
 
@@ -127,8 +126,8 @@ CLI 或浏览器依赖仍没有统一的安装生命周期。把后端继续留�
 
    0.3.x 期间提供一次性脚本，按 `preflight → plugins → backends → config → restart`
    执行；插件升级用 `extensions install ... --no-setup`，后端安装用
-   `extensions setup <id>`。P1 的 `config` 阶段是占位（skipped），P2 再迁移旧配置键/密钥；
-   0.4.x 起删除整个 `scripts/migrations/`。`--dry-run` / `--resume` / `--rollback` /
+   `extensions setup <id>`。`config` 阶段仍是占位（skipped）；旧配置键/密钥迁移不在
+   本版本范围内。0.4.x 起删除整个 `scripts/migrations/`。`--dry-run` / `--resume` / `--rollback` /
    `--rollback-on-failure` / `--continue-on-error` / `--plugin` / `--jsonl` 等行为以脚本
    的 README 为准。
 
@@ -169,8 +168,9 @@ CLI 或浏览器依赖仍没有统一的安装生命周期。把后端继续留�
 
 - **0.3.x**：`api_version: 2` + `backends` + `setup` 可用；`asg plugins` 仍可解析旧名并
   回退旧安装器；迁移脚本的 `config` 阶段为空操作；旧 `data/backends` 保留。
-- **P2**：补迁移脚本的 `config` 阶段（旧配置键/密钥迁移），不改变本文的 setup/CLI 契约。
+- **后续版本**：按需补迁移脚本的 `config` 阶段（旧配置键/密钥迁移），不改变本文的
+  setup/CLI 契约。
 - **0.4.x**：删除 `scripts/migrations/` 与旧的 `scripts/backends` 回退路径；`data/backends`
   不再作为默认迁移源（是否清理由用户决定，不由 CLI 静默删除）。
 
-本文不声称 P1 已完成 config 迁移或 0.4.x 清理；这些是后续阶段的明确边界。
+本文不声称 config 迁移或 0.4.x 清理已经完成；这些是后续阶段的明确边界。

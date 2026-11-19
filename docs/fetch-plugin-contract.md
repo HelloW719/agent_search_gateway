@@ -256,12 +256,13 @@ errorResult(code, message, { status?, finalUrl?, hint? });
 3. `match` 只做纯 URL 判断；开关与参数读 `ctx.pluginConfig`（如
    `enabled: (ctx) => ctx.pluginConfig?.enabled !== false`）；维护面信息写到
    `available(ctx)` 与 `requires`；在 `channels` 里声明该平台实际使用的通道。
-4. 在 `asg-plugin.json` 的 `config_schema` 里声明私有配置；用户用
-   `asg extensions config <id> --set key=value` 修改，密钥用
+4. 在 `asg-extension.json`（V2）或 `asg-plugin.json`（V1）的 `config_schema` 里声明
+   私有配置；用户用 `asg extensions config <id> --set key=value` 修改，密钥用
    `asg extensions secret <id> --name <name> --stdin` 写入。**不再**需要改核心
-   `settings/schema.ts`；只有新增平台 ID 才需要改 `platforms.ts`。
+   `settings/schema.ts`。V1 的平台回退仍读旧的 `platforms.ts`；V2 计划从
+   `fetch_channels[].id` 前缀派生，本版本尚未启用。
 5. 插件入口导出命名 `fetch`，由 `asg extensions install` 安装到
-   `data/extensions/<id>/`；网关启动时自动加载。
+   `data/extensions/<id>/`；V1 在网关启动时自动加载，V2 尚未启用。
 6. 补测试：URL 匹配、`enabled` 禁用后 `find` 回退、配置默认值、结果字段与错误码。
 
 注册表会在构造时检查重复 `id`，重复直接 `throw`，避免静默覆盖。
@@ -269,8 +270,8 @@ errorResult(code, message, { status?, finalUrl?, hint? });
 ## 外部插件
 
 `FetchPlugin` 与 `src/fetch/channels/` 是稳定契约。运行时加载由
-`src/extensions/loader.ts` 负责：扫描 `data/extensions/<id>/`，按
-`asg-plugin.json` 的 `provides` 读取命名导出 `fetch` / `engine`，再注入
-fetch 注册表与 gateway engine overlay。安装、校验与发布流程见 `docs/extensions.md`。
+`src/extensions/loader.ts` 负责：扫描 `data/extensions/<id>/`，按 V1 manifest 的
+`provides` 读取命名导出 `fetch` / `engine`，再注入 fetch 注册表与 gateway engine
+overlay；V2 manifest 本版本跳过加载。安装、校验与发布流程见 `docs/extensions.md`。
 
 插件与网关同进程运行，没有沙箱；只安装可信来源。

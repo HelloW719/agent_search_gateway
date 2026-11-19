@@ -364,8 +364,9 @@ asg restart
 - 插件可用可选的 `config_schema` 声明私有配置（默认值、枚举、范围等），用户用
   `asg extensions config <id> --set key=value` 读写；密钥用
   `asg extensions secret <id> --name <name> --stdin` 写入（不进 argv）。
-- 安装位置：`data/extensions/<id>/`；插件可写数据在 `data/plugin-data/<id>/`，
-  更新插件不会丢后端。卸载用 `asg extensions remove <id>`（默认删数据，`--keep-data` 保留）。
+- 安装位置：`data/extensions/<id>/`（V2 用 `asg-extension.json`，V1 用 `asg-plugin.json`）；
+  插件可写数据在 `data/extension-data/<id>/`，更新插件不会丢后端。卸载用
+  `asg extensions remove <id>`（默认删数据，`--keep-data` 保留）。
 - `install` / `setup` / `remove` 不会自动重启网关；`config` / `secret` 写入后仍会整栈重启。
 - 插件与网关同进程运行，没有沙箱；setup 子进程也不是沙箱。只安装可信来源。
 - 发现：GitHub topic `asg-plugin`；`asg extensions search` 只列仓库，安装仍需显式执行。
@@ -593,7 +594,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 `setup(ctx)`，安装/更新/卸载时由 CLI 在独立子进程中调用。新位置是：
 
 ```text
-data/plugin-data/<plugin-id>/backends/<backend-id>/
+data/extension-data/<extension-id>/backends/<backend-id>/
 ```
 
 `data/backends/<name>/` 是旧安装器的目录，只作为只读迁移源：插件应复制需要的文件到新位置，
@@ -606,8 +607,11 @@ asg extensions list                               # BACKENDS 列显示安装状�
 asg extensions remove <id> [--keep-data] [--force]
 ```
 
-`asg plugins list|install|remove` 已弃用，仅保留为兼容 facade：命中已安装 manifest 的
-`backend.id` / `legacy_names` 时走插件 setup，未命中才回退旧的
+V2 manifest（`asg-extension.json`）本版本只用于安装与 `asg extensions list` 展示；
+运行时会跳过并提示“V2 尚未启用”。V1 仍是唯一加载路径。
+
+`asg plugins list|install|remove` 已弃用，仅保留为兼容 facade：只读取 V1
+`asg-plugin.json`，命中 `backend.id` / `aliases` 时走插件 setup，未命中才回退旧的
 `scripts/backends/cli.mjs` 安装器（安装到 `data/backends/<name>/`）。`asg plugins install` /
 `remove` 仍会整栈重启；`asg extensions install` / `setup` / `remove` 不会。
 

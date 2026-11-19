@@ -78,6 +78,7 @@ function fakeDeps(options: FakeDepsOptions = {}): InstallDeps {
   const release = options.release ?? makeRelease(options.tag ?? `v${version}`, options.omit, options.urls);
   const contents: Record<string, string> = {
     "asg-plugin.json": manifestText,
+    "asg-extension.json": manifestText,
     "index.mjs": entryText,
     SHA256SUMS: options.sumsText ?? sums(manifestText, "index.mjs", entryText),
   };
@@ -131,6 +132,8 @@ describe("安装扩展", () => {
       name: "Demo Fetch",
       provides: ["fetch"],
       backends: [],
+      fetch_channels: [],
+      search_engines: [],
       path: path.join(extensionsPath(root), "demo-fetch"),
     });
     expect(fs.readFileSync(path.join(result.path, "index.mjs"), "utf8")).toBe(ENTRY_TEXT);
@@ -142,12 +145,53 @@ describe("安装扩展", () => {
     expect(fetchJson.mock.calls[0]![0]).toBe(
       "https://api.github.com/repos/owner/asg-plugin-demo/releases/latest",
     );
+
     const request = fetchJson.mock.calls[0]![1] as { headers: Record<string, string> };
     expect(request.headers).toMatchObject({
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
     });
     expect(request.headers["User-Agent"]).toMatch(/^asg\//);
+  });
+
+  it("优先安装 asg-extension.json 并返回 V2 字段", async () => {
+    const root = tempRoot();
+    const v2 = {
+      ...MANIFEST,
+      api_version: 2,
+      backends: [{ id: "demo-api", name: "Demo API", aliases: ["demo_old"] }],
+      fetch_channels: [
+        {
+          id: "example:cli",
+          name: "Example CLI",
+          backends: ["demo-api"],
+          aliases: ["example"],
+        },
+      ],
+      search_engines: [{ id: "gateway.search:example", name: "Example Search" }],
+    };
+    const manifestText = JSON.stringify(v2);
+    const sumsText = `${sha256(manifestText)}  asg-extension.json\n${sha256(ENTRY_TEXT)}  index.mjs\n`;
+    const release = {
+      tag_name: "v1.2.3",
+      assets: [
+        { name: "asg-extension.json", browser_download_url: "https://example.test/asg-extension.json" },
+        { name: "asg-plugin.json", browser_download_url: "https://example.test/asg-plugin.json" },
+        { name: "index.mjs", browser_download_url: "https://example.test/index.mjs" },
+        { name: "SHA256SUMS", browser_download_url: "https://example.test/SHA256SUMS" },
+      ],
+    };
+    const deps = fakeDeps({ manifestText, sumsText, release });
+
+    const result = await installExtension({ root, repo: "owner/demo", deps });
+    expect(result.backends.map((backend) => backend.id)).toEqual(["demo-api"]);
+    expect(result.fetch_channels.map((channel) => channel.id)).toEqual(["example:cli"]);
+    expect(result.search_engines.map((engine) => engine.id)).toEqual([
+      "gateway.search:example",
+    ]);
+    expect(assetNames(deps)[0]).toBe("asg-extension.json");
+    expect(fs.existsSync(path.join(result.path, "asg-extension.json"))).toBe(true);
+    expect(fs.existsSync(path.join(result.path, "asg-plugin.json"))).toBe(false);
   });
 
   it("api_version 2 的 backends 会写入安装结果与列表", async () => {
@@ -271,7 +315,7 @@ describe("安装扩展", () => {
   it("缺少 SHA256SUMS / manifest / entry 资产时失败", async () => {
     for (const [omit, pattern] of [
       [["SHA256SUMS"], /缺少资产 SHA256SUMS/],
-      [["asg-plugin.json"], /缺少资产 asg-plugin\.json/],
+      [["asg-plugin.json"], /缺少资产 asg-extension\.json 或 asg-plugin\.json/],
       [["index.mjs"], /缺少 manifest\.entry/],
     ] as const) {
       const deps = fakeDeps({ omit: [...omit] });

@@ -1,109 +1,116 @@
-/** 第三方插件 manifest（asg-plugin.json）的校验。
+/** 第三方扩展 manifest 的解析。
  *
- * 这一期只负责“声明 + 安装薄层”：manifest 只描述插件身份与能力，
- * 不包含任何运行时代码，也不参与网关启动。
+ * 过渡版本只负责“声明 + 安装薄层”：
+ * - V1：asg-plugin.json，保持旧字段；
+ * - V2：asg-extension.json，带 backends / fetch_channels / search_engines；
+ * - V2 字段本版本只用于安装与展示，运行时不启用 V2。
+ *
+ * 这一层不做严格校验：未知字段忽略，只保留字段类型、必填项和路径安全约束。
  */
 
 import path from "node:path";
 import { z } from "zod";
 import { validateConfigSchemaDefinition } from "./config.js";
 
-/** 插件 id：3-64 位小写字母/数字/`. _ -`，首尾必须是字母或数字。 */
+/** 扩展 id：3-64 位小写字母/数字/`. _ -`，首尾必须是字母或数字。 */
 export const EXTENSION_ID_RE = /^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$/;
 
-/** 插件版本：语义化版本的主干 + 可选预发布后缀（不接受 build 元数据）。 */
+/** 扩展版本：语义化版本的主干 + 可选预发布后缀（不接受 build 元数据）。 */
 export const EXTENSION_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
-/** 插件能力：search 表示搜索源，fetch 表示抓取实现。 */
+/** 扩展能力：search 表示搜索源，fetch 表示抓取实现。 */
 export const EXTENSION_PROVIDES = ["search", "fetch"] as const;
 
 export type ExtensionProvide = (typeof EXTENSION_PROVIDES)[number];
 
-/** manifest 声明的后端（P1 起 api_version 2 可用）：只描述身份与旧名，不承载代码。 */
-const backendSchema = z
-  .object({
-    id: z
-      .string()
-      .regex(
-        EXTENSION_ID_RE,
-        "backends[].id 必须是 3-64 位小写字母/数字/._-，且首尾为字母或数字",
-      ),
-    name: z
-      .string()
-      .min(1, "backends[].name 不能为空")
-      .max(80, "backends[].name 最长 80 个字符"),
-    description: z.string().optional(),
-    /** 旧 asg plugins 的输入名；用于兼容历史配置/密钥键。 */
-    aliases: z
-      .array(z.string().min(1, "aliases 不能包含空字符串"))
-      .refine((items) => new Set(items).size === items.length, "aliases 不能包含重复项")
-      .optional(),
-  })
-  .strict();
+/** V2 manifest 文件名。 */
+export const V2_MANIFEST_FILE = "asg-extension.json";
+
+/** V1 manifest 文件名。 */
+export const V1_MANIFEST_FILE = "asg-plugin.json";
+
+/** 发现顺序：优先 V2，回退 V1。 */
+export const MANIFEST_FILE_NAMES = [V2_MANIFEST_FILE, V1_MANIFEST_FILE] as const;
+
+export type ManifestFileName = (typeof MANIFEST_FILE_NAMES)[number];
+
+/** manifest 声明的后端：只描述身份与旧名，不承载代码。 */
+const backendSchema = z.object({
+  id: z
+    .string()
+    .regex(
+      EXTENSION_ID_RE,
+      "backends[].id 必须是 3-64 位小写字母/数字/._-，且首尾为字母或数字",
+    ),
+  name: z.string().min(1, "backends[].name 不能为空"),
+  description: z.string().optional(),
+  /** 旧 asg plugins 的输入名；只用于兼容历史配置/密钥键。 */
+  aliases: z.array(z.string()).optional(),
+});
 
 export type ExtensionBackend = z.infer<typeof backendSchema>;
 
-const manifestSchema = z
-  .object({
-    id: z
-      .string()
-      .regex(EXTENSION_ID_RE, "id 必须是 3-64 位小写字母/数字/._-，且首尾为字母或数字"),
-    name: z.string().min(1, "name 不能为空").max(80, "name 最长 80 个字符"),
-    version: z
-      .string()
-      .regex(EXTENSION_VERSION_RE, "version 必须是语义化版本，例如 1.2.3 或 1.2.3-beta.1"),
-    api_version: z.literal([1, 2], "api_version 只支持 1 或 2"),
-    provides: z
-      .array(z.enum(EXTENSION_PROVIDES, "provides 只能包含 search / fetch"))
-      .min(1, "provides 至少声明一项能力")
-      .refine((items) => new Set(items).size === items.length, "provides 不能包含重复项"),
-    entry: z
-      .string()
-      .min(1, "entry 不能为空")
-      .refine((value) => isValidEntryName(value), "entry 只能是单个 .mjs / .js 文件名"),
-    platform: z
-      .string()
-      .regex(/^[a-z0-9-]+$/, "platform 只能是小写字母/数字/-")
-      .optional(),
-    description: z.string().optional(),
-    /** api_version 2 起可声明的后端；非空时必须 api_version === 2。 */
-    backends: z.array(backendSchema).optional(),
-    /** 插件私有配置的声明（JSON Schema 子集）；校验见 config.ts。 */
-    config_schema: z.unknown().optional(),
-  })
-  .strict()
-  .superRefine((manifest, ctx) => {
-    const backends = manifest.backends;
-    if (!backends || backends.length === 0) return;
+/** V2 抓取通道声明。 */
+const fetchChannelSchema = z.object({
+  id: z.string().min(1, "fetch_channels[].id 不能为空"),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  backends: z.array(z.string()).optional(),
+  aliases: z.array(z.string()).optional(),
+});
 
-    if (manifest.api_version !== 2) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["backends"],
-        message: "声明 backends 需要 api_version: 2",
-      });
-      return;
-    }
+export type ExtensionFetchChannel = z.infer<typeof fetchChannelSchema>;
 
-    const seen = new Set<string>();
-    for (const [index, backend] of backends.entries()) {
-      if (seen.has(backend.id)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["backends", index, "id"],
-          message: `backends 不能包含重复 id：${backend.id}`,
-        });
-      } else {
-        seen.add(backend.id);
-      }
-    }
-  });
+/** V2 搜索源声明。 */
+const searchEngineSchema = z.object({
+  id: z.string().min(1, "search_engines[].id 不能为空"),
+  name: z.string().optional(),
+  description: z.string().optional(),
+});
 
-type ParsedManifest = z.infer<typeof manifestSchema>;
+export type ExtensionSearchEngine = z.infer<typeof searchEngineSchema>;
 
-export type ExtensionManifest = Omit<ParsedManifest, "config_schema"> & {
+const commonFields = {
+  id: z
+    .string()
+    .regex(EXTENSION_ID_RE, "id 必须是 3-64 位小写字母/数字/._-，且首尾为字母或数字"),
+  name: z.string().min(1, "name 不能为空"),
+  version: z
+    .string()
+    .regex(EXTENSION_VERSION_RE, "version 必须是语义化版本，例如 1.2.3 或 1.2.3-beta.1"),
+  provides: z.array(z.enum(EXTENSION_PROVIDES, "provides 只能包含 search / fetch")),
+  entry: z
+    .string()
+    .min(1, "entry 不能为空")
+    .refine((value) => isValidEntryName(value), "entry 只能是单个 .mjs / .js 文件名"),
+  description: z.string().optional(),
+  config_schema: z.unknown().optional(),
+};
+
+const manifestV1Schema = z.object({
+  ...commonFields,
+  api_version: z.literal(1, "api_version 必须是 1"),
+  platform: z.string().optional(),
+});
+
+const manifestV2Schema = z.object({
+  ...commonFields,
+  api_version: z.literal(2, "api_version 必须是 2"),
+  backends: z.array(backendSchema).optional(),
+  fetch_channels: z.array(fetchChannelSchema).optional(),
+  search_engines: z.array(searchEngineSchema).optional(),
+});
+
+type ParsedManifestV1 = z.infer<typeof manifestV1Schema>;
+type ParsedManifestV2 = z.infer<typeof manifestV2Schema>;
+
+export type ExtensionManifestV1 = Omit<ParsedManifestV1, "config_schema"> & {
   config_schema?: Record<string, unknown>;
 };
+export type ExtensionManifestV2 = Omit<ParsedManifestV2, "config_schema"> & {
+  config_schema?: Record<string, unknown>;
+};
+export type ExtensionManifest = ExtensionManifestV1 | ExtensionManifestV2;
 
 /** manifest 解析/校验错误：消息已包含中文说明，调用方负责包装成 CLI 错误。 */
 export class ManifestError extends Error {
@@ -141,20 +148,25 @@ function formatIssues(error: z.ZodError): string {
     .join("；");
 }
 
-/** 解析并校验 manifest 文本；失败抛 ManifestError（中文说明）。 */
-export function parseManifest(text: string): ExtensionManifest {
+/** 解析 manifest 文本；失败抛 ManifestError（中文说明）。 */
+export function parseManifest(text: string, file: string = V1_MANIFEST_FILE): ExtensionManifest {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (error) {
     throw new ManifestError(
-      `asg-plugin.json 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+      `${file} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
-  const result = manifestSchema.safeParse(raw);
+  const apiVersion =
+    typeof raw === "object" && raw !== null && (raw as { api_version?: unknown }).api_version === 2
+      ? 2
+      : 1;
+  const schema = apiVersion === 2 ? manifestV2Schema : manifestV1Schema;
+  const result = schema.safeParse(raw);
   if (!result.success) {
-    throw new ManifestError(`asg-plugin.json 校验失败：${formatIssues(result.error)}`);
+    throw new ManifestError(`${file} 校验失败：${formatIssues(result.error)}`);
   }
 
   if (result.data.config_schema !== undefined) {
@@ -162,7 +174,7 @@ export function parseManifest(text: string): ExtensionManifest {
       validateConfigSchemaDefinition(result.data.config_schema);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      throw new ManifestError(`asg-plugin.json 校验失败：${detail}`);
+      throw new ManifestError(`${file} 校验失败：${detail}`);
     }
   }
 

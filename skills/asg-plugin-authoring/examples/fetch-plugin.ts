@@ -10,7 +10,7 @@
  * 因此实现里统一用 `globalThis.fetch`（或把实现留在 plugin.ts）。
  *
  * 依赖的类型来自 `src/sdk/`（从网关复制的契约类型），不要 import 网关包。
- * 私有配置由 `asg-plugin.json` 的 `config_schema` 声明，存在
+ * 私有配置由 `asg-extension.json` 的 `config_schema` 声明，存在
  * `gateway.yaml → extensions.<manifest id>.config`，运行期读 `ctx.pluginConfig`。
  */
 import type { FetchPlugin, FetchPluginContext, FetchPluginResult } from "./sdk/fetch-plugin.js";

@@ -1,25 +1,26 @@
-# asg-plugin.json（manifest）
+# asg-extension.json（manifest）
 
-插件根目录必须包含 `asg-plugin.json`。网关用 zod **严格校验**：未知字段直接报错，
-不允许注释、尾逗号或自定义字段。
+插件根目录放 `asg-extension.json`（V2）；旧插件可继续用 `asg-plugin.json`（V1）。
+本版本不做严格字段校验：未知字段忽略，只保留类型、必填项和路径安全约束。
 
 ## 字段
 
-| 字段 | 必填 | 规则 |
-| --- | --- | --- |
-| `id` | 是 | 3–64 位小写字母/数字/`.` `_` `-`，首尾必须是字母或数字；也是安装目录名 |
-| `name` | 是 | 1–80 个字符的展示名 |
-| `version` | 是 | 语义化版本 `\d+\.\d+\.\d+(-预发布)?`；必须与 Release tag 去掉 `v` 后一致 |
-| `api_version` | 是 | `1` 或 `2` |
-| `provides` | 是 | 非空数组，元素只能是 `"search"` / `"fetch"`，不能重复 |
-| `entry` | 是 | 单个 `.mjs` / `.js` 文件名；不能含 `/`、`\`、`..`、`:`，不能是绝对路径 |
-| `platform` | 否 | 小写字母/数字/`-`；作为 fetch 插件平台回退，缺省用 `id` |
-| `description` | 否 | 任意字符串（建议一句话说明能力） |
-| `backends` | 否 | 后端声明数组；非空时必须 `api_version: 2`，见下文 |
-| `config_schema` | 否 | 插件私有配置声明（JSON Schema 子集，见下文）；省略时 `config` 原样透传 |
+| 字段 | 版本 | 必填 | 规则 |
+| --- | --- | --- | --- |
+| `id` | V1/V2 | 是 | 3–64 位小写字母/数字/`.` `_` `-`，首尾必须是字母或数字；也是安装目录名 |
+| `name` | V1/V2 | 是 | 展示名 |
+| `version` | V1/V2 | 是 | 语义化版本；必须与 Release tag 去掉 `v` 后一致 |
+| `api_version` | V1/V2 | 是 | `1` 或 `2` |
+| `provides` | V1/V2 | 是 | 元素只能是 `"search"` / `"fetch"` |
+| `entry` | V1/V2 | 是 | 单个 `.mjs` / `.js` 文件名；不能含 `/`、`\`、`..`、`:`，不能是绝对路径 |
+| `description` | V1/V2 | 否 | 人类可读摘要 |
+| `config_schema` | V1/V2 | 否 | 私有配置声明（JSON Schema 子集，见下文）；省略时 `config` 原样透传 |
+| `platform` | V1 | 否 | 平台回退值；V2 从 `fetch_channels[].id` 前缀派生 |
+| `backends` | V2 | 否 | 后端声明数组，见下文 |
+| `fetch_channels` | V2 | 否 | 抓取通道声明 |
+| `search_engines` | V2 | 否 | 搜索源声明 |
 
-`api_version: 1` 的插件不能声明非空 `backends`；`"backends": []` 等价于未声明。
-manifest 与 `backends[]` 都是严格对象，任何未知字段都会让校验失败。
+V2 字段本版本只用于安装与 `asg extensions list` 展示；运行时会跳过 V2 manifest。
 
 ## 示例（无后端）
 
@@ -94,6 +95,33 @@ manifest 与 `backends[]` 都是严格对象，任何未知字段都会让校验
 - `update` action 是契约预留；当前 CLI 升级插件时传的是 `install`，插件应按幂等方式
   处理 `install` / `update`，不要假设 `update` 一定会出现。
 - 完整上下文、路径与 API 见 [`setup.md`](setup.md)。
+
+## 抓取通道与搜索源（V2）
+
+```json
+{
+  "fetch_channels": [
+    {
+      "id": "example:cli",
+      "name": "Example CLI",
+      "description": "通过本地 CLI 抓取",
+      "backends": ["example-cli"],
+      "aliases": ["example"]
+    }
+  ],
+  "search_engines": [
+    {
+      "id": "gateway.search:example",
+      "name": "Example Search",
+      "description": "示例搜索源"
+    }
+  ]
+}
+```
+
+- `fetch_channels[].id` 使用 `platform:channel`；同一扩展内使用同一 platform 前缀。
+- `search_engines[].id` 使用 `gateway.search:<name>` 或 `gateway.reverse_image:<name>`。
+- 本版本只做安装与列表展示，运行时不消费这些字段。
 
 ## provides 与命名导出的对应关系
 
@@ -186,7 +214,7 @@ setup 里可以用 `ctx.config.get/patch/replace/unset` 读写同一段配置；
 
 | 资产 | 说明 |
 | --- | --- |
-| `asg-plugin.json` | manifest 本体 |
+| `asg-extension.json` | manifest 本体 |
 | `index.mjs`（或 `entry` 指定的文件） | 单文件 ESM，不能依赖同目录其它文件；可同时导出 `fetch` / `engine` / `setup` |
 | `SHA256SUMS` | `sha256sum` 格式，必须覆盖前两者 |
 

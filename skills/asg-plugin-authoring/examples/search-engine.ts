@@ -6,7 +6,7 @@
  *   import { exampleProvider } from "./engine.js";
  *   export const engine = exampleProvider;
  *
- * `asg-plugin.json` 需要 `provides: ["search"]`（与 fetch 同时存在时写
+ * `asg-extension.json` 需要 `provides: ["search"]`（与 fetch 同时存在时写
  * `["search", "fetch"]`），并用 `config_schema` 声明下面的字段。
  * 约定 manifest id 为 `example`：配置存在 `extensions.example.config`。
  */

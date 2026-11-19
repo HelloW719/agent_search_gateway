@@ -6,16 +6,18 @@
 
 ### Added
 
-- 插件 manifest `api_version: 2` 与 `backends` 声明；入口可选导出 `setup(ctx)`，由插件自行下载、校验、安装所需后端。
+- 插件 manifest `api_version: 2` 支持 `backends`、`fetch_channels`、`search_engines`；入口可选导出 `setup(ctx)`，由插件自行下载、校验、安装所需后端。
+- 新增 `asg-extension.json`（V2 manifest）；安装器优先新文件，缺失时回退 `asg-plugin.json`。本版本 V2 只用于安装与展示，运行时尚未启用。
+- `asg extensions list` 输出 `backends` / `fetch_channels` / `search_engines`，新增 CHANNELS / ENGINES 列。
 - setup 宿主：独立子进程 + IPC，提供文件、https 下载、SHA256、解压、命令执行、`extensions.<id>.config`、state 与 backendState 能力。
-- 插件数据目录 `data/plugin-data/<id>/`，与 `data/extensions/<id>/` 分离；插件更新不再丢后端。
+- 插件数据目录 `data/extension-data/<id>/`，与 `data/extensions/<id>/` 分离；插件更新不再丢后端。
 - `asg extensions install|setup|remove` 增加后端生命周期：默认安装全部声明后端，支持 `--backend`、`--no-setup`、`--status`、`--uninstall`、`--keep-data`、`--force`。
-- 新增 0.3.x 临时迁移脚本 `scripts/migrations/0.3.x.mjs`：分段 preflight → plugins → backends → config（P1 跳过）→ restart，支持 dry-run、resume、rollback 与 jsonl。
+- 新增 0.3.x 临时迁移脚本 `scripts/migrations/0.3.x.mjs`：分段 preflight → plugins → backends → config（占位跳过）→ restart，支持 dry-run、resume、rollback 与 jsonl。
 - 新增 ADR-0022：插件自管后端与 setup 钩子。
 
 ### Changed
 
-- `asg plugins` 降级为兼容 facade：只按已安装 manifest 的 `backends[].id` / `legacy_names` 解析，未命中回退旧 `scripts/backends/cli.mjs`；`asg extensions` 成为推荐入口。
+- `asg plugins` 降级为兼容 facade：只按已安装 manifest 的 `backends[].id` / `aliases` 解析，未命中回退旧 `scripts/backends/cli.mjs`；`asg extensions` 成为推荐入口。本版本该 facade 不读取 V2 manifest。
 - `asg extensions install/setup/remove` 不自动重启网关；`config` / `secret` 写入仍整栈重启。
 - 插件 `config` 写入在 setup 子进程内同样按 `config_schema` 校验，失败不落盘。
 

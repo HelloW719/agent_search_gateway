@@ -167,6 +167,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** V1 没有 backends；只有 V2 manifest 才返回声明。 */
+function declaredBackends(manifest: ExtensionManifest | undefined): ExtensionBackend[] {
+  return manifest?.api_version === 2 ? (manifest.backends ?? []) : [];
+}
+
 /** list 输出里的后端条目：manifest 声明 + `backends.json` 中的运行状态（只读文件）。 */
 export interface ListedBackend extends ExtensionBackend {
   installed: boolean;
@@ -218,13 +223,19 @@ function renderBackends(backends: ListedBackend[]): string {
     .join(",");
 }
 
+function renderIds(items: readonly { id: string }[] | undefined): string {
+  return items && items.length > 0 ? items.map((item) => item.id).join(",") : "-";
+}
+
 function renderList(extensions: ListedExtension[]): string {
-  const header = ["ID", "VERSION", "PROVIDES", "BACKENDS", "ENTRY"];
+  const header = ["ID", "VERSION", "PROVIDES", "BACKENDS", "CHANNELS", "ENGINES", "ENTRY"];
   const rows = extensions.map((extension) => [
     extension.id,
     extension.version ?? "-",
     extension.provides && extension.provides.length > 0 ? extension.provides.join(",") : "-",
     renderBackends(extension.backends),
+    renderIds(extension.fetch_channels),
+    renderIds(extension.search_engines),
     extension.entry ?? "-",
   ]);
 
@@ -498,6 +509,8 @@ async function runInstall(
       `已安装 ${result.name} (${result.id}) v${result.version}`,
       `能力: ${result.provides.join(", ")}`,
       `后端: ${backendIds.length > 0 ? backendIds.join(", ") : "-"}`,
+      `通道: ${renderIds(result.fetch_channels)}`,
+      `搜索源: ${renderIds(result.search_engines)}`,
       `路径: ${result.path}`,
       setupLine,
       "重启网关后生效。",
@@ -532,7 +545,7 @@ async function runSetup(
 
   const id = positional[0]!;
   const manifest = api.loadManifest(root, id);
-  const declared = manifest.backends ?? [];
+  const declared = declaredBackends(manifest);
   if (declared.length === 0) {
     throw new CliError("CONFIG_INVALID", EXIT.INVALID, `该插件没有声明后端：${id}`);
   }
@@ -608,7 +621,7 @@ async function runRemove(
     }
   }
 
-  const declared = manifest?.backends ?? [];
+  const declared = declaredBackends(manifest);
   const backendIds = declared.map((backend) => backend.id);
 
   let setupReport: SetupReport | null = null;

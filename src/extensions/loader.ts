@@ -2,11 +2,13 @@
  *
  * 约定（见 docs/extensions.md）：
  * - 目录名必须等于 `manifest.id`，否则视为坏包；
- * - `api_version` 支持 1 与 2；v2 允许声明 `backends`（加载层不消费，也不因此报错）；
+ * - V1（`asg-plugin.json`）正常加载；V2（`asg-extension.json`）本版本只安装与展示，
+ *   加载层记录 warning 后跳过；
  * - `provides: ["fetch"]` 读取命名导出 `fetch`，`provides: ["search"]` 读取 `engine`；
  * - 单个插件加载失败只记录 error + warn，不影响网关启动与其它插件。
  */
 
+import fsSync from "node:fs";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -18,7 +20,14 @@ import { hasCategory } from "../search/category.js";
 import { resolveSecretValue } from "../settings/secret-ref.js";
 import { deepFreeze, resolvePluginConfig, type PluginConfig } from "./config.js";
 import { extensionsDir } from "./install.js";
-import { parseManifest, type ExtensionManifest } from "./manifest.js";
+import {
+  MANIFEST_FILE_NAMES,
+  V1_MANIFEST_FILE,
+  V2_MANIFEST_FILE,
+  parseManifest,
+  type ExtensionManifest,
+  type ExtensionManifestV1,
+} from "./manifest.js";
 
 export { extensionsDir };
 
@@ -45,8 +54,6 @@ export interface LoadExtensionsOptions {
 
 const DEFAULT_IMPORT: ExtensionModuleImporter = (url) => import(url);
 
-const MANIFEST_FILE = "asg-plugin.json";
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -72,7 +79,7 @@ function fail(
 }
 
 /** 用 manifest 覆盖 fetch 插件的身份元数据，函数实现与可选字段原样保留。 */
-function toFetchPlugin(manifest: ExtensionManifest, raw: Record<string, unknown>): FetchPlugin {
+function toFetchPlugin(manifest: ExtensionManifestV1, raw: Record<string, unknown>): FetchPlugin {
   if (typeof raw.match !== "function" || typeof raw.fetch !== "function") {
     throw new Error("provides 含 fetch，但入口导出的 fetch 缺少 match / fetch 函数");
   }
@@ -353,25 +360,33 @@ export async function loadExtensions(
     const dirName = entry.name;
     const dir = path.join(baseDir, dirName);
 
+    const manifestFile = MANIFEST_FILE_NAMES.find((name) =>
+      fsSync.existsSync(path.join(dir, name)),
+    );
+    if (!manifestFile) {
+      fail(result, logger, dirName, `未找到 ${V2_MANIFEST_FILE} 或 ${V1_MANIFEST_FILE}`);
+      continue;
+    }
+
     let text: string;
     try {
-      text = await fs.readFile(path.join(dir, MANIFEST_FILE), "utf8");
+      text = await fs.readFile(path.join(dir, manifestFile), "utf8");
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      fail(
-        result,
-        logger,
-        dirName,
-        code === "ENOENT" ? `未找到 ${MANIFEST_FILE}` : `无法读取 ${MANIFEST_FILE}：${messageOf(error)}`,
-      );
+      fail(result, logger, dirName, `无法读取 ${manifestFile}：${messageOf(error)}`);
       continue;
     }
 
     let manifest: ExtensionManifest;
     try {
-      manifest = parseManifest(text);
+      manifest = parseManifest(text, manifestFile);
     } catch (error) {
       fail(result, logger, dirName, error);
+      continue;
+    }
+
+    // V2 字段本版本只用于安装与展示，运行时仍走 V1。
+    if (manifest.api_version === 2) {
+      logger?.warn(`扩展 ${manifest.id} 使用 V2 manifest，本版本尚未启用，已跳过加载`);
       continue;
     }
 
