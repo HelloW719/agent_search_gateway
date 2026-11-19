@@ -35,7 +35,8 @@ description: 为 agent-search-gateway（asg）编写、迁移或发布第三方�
    `Semaphore`、通道常量等）复制进去，不要从宿主 import。
 5. `asg-extension.json` 支持 `id/name/version/api_version/provides/entry/description/config_schema`，
    `api_version: 2` 还可以写 `backends` / `fetch_channels` / `search_engines`。本版本
-   不做严格字段校验，未知字段忽略；V2 字段只用于安装与列表展示，运行时尚未启用。
+   不做严格字段校验，未知字段忽略；V1/V2 都会加载，V2 的后端通过
+   `ctx.pluginBackends` 提供给插件使用。
 6. 从 **0.3.4** 起，网关内置的 `bilibili` / `weibo` / `cnki` 已迁出为官方插件仓库，
    用户需要安装官方插件（见文末）而不是依赖内置实现。旧版本（≤0.3.3）会把这些 id
    当作内置能力拒绝安装，先升级网关。
@@ -326,7 +327,7 @@ export const fetch = examplePlugin;        // 运行期约定：命名导出 fet
 ```
 
 `ctx` 里第三方插件只需要 `pluginConfig`（已补默认值、冻结）、`pluginSecrets`（已解析
-`env:`）与 `logger`。`settings` / `secrets` / `getSecret(path)` 是核心内置实现的切片，
+`env:`）、`pluginBackends`（V2 声明 backends 时）与 `logger`。`settings` / `secrets` / `getSecret(path)` 是核心内置实现的切片，
 外部插件不要依赖。不要假设宿主帮你处理 cookie/会话/重定向——插件自己管。
 
 完整可复制示例见 `examples/fetch-plugin.ts`；契约细节见 `references/fetch-plugin.md`。

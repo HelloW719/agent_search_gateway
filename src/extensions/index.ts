@@ -36,6 +36,7 @@ export {
 } from "./install.js";
 export { loadExtensions } from "./loader.js";
 export type { LoadExtensionsOptions, LoadedExtensions } from "./loader.js";
+export type { PluginBackendState, PluginBackends } from "./paths.js";
 export type {
   Download,
   ExtensionSearchItem,

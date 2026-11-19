@@ -10,6 +10,7 @@
  * - `enabled(ctx)` 是统一的开关，禁用后注册表直接跳过，回退通用抓取；
  * - `available(ctx)` 只用于维护面（健康检查 / 列表），**不参与** `find`。
  */
+import type { PluginBackends } from "../../extensions/paths.js";
 import type { ChannelContext, FetchChannel } from "../channels/types.js";
 
 export interface FetchPluginContext extends ChannelContext {
@@ -17,6 +18,8 @@ export interface FetchPluginContext extends ChannelContext {
   pluginSecrets?: Record<string, string>;
   /** 外部插件的私有配置（extensions.<manifest id>.config；未声明 schema 时原样透传）。 */
   pluginConfig?: Readonly<Record<string, unknown>>;
+  /** 外部插件自己安装的后端；V2 manifest 声明 backends 时注入。 */
+  pluginBackends?: PluginBackends;
 }
 
 export interface FetchPluginResult {

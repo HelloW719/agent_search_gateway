@@ -478,7 +478,7 @@ asg plugins remove <name>
 
 解析顺序：
 
-1. 在 `data/extensions/*/asg-plugin.json`（仅 V1）的 `backends[]` 中按 `backend.id` 或
+1. 在 `data/extensions/*/asg-extension.json` 或 `asg-plugin.json` 的 `backends[]` 中按 `backend.id` 或
    `aliases` 精确匹配；命中后对对应后端执行 setup（`install` / `uninstall`），
    成功后整栈重启；
 2. 未命中时回退旧的 `scripts/backends/cli.mjs <name> <action> --root <ROOT> --json`，
@@ -533,7 +533,8 @@ asg extensions secret <id> --name <name> --stdin | --clear
 - manifest 文件优先 `asg-extension.json`（V2），缺失时回退 `asg-plugin.json`（V1）。
 - V2 字段：`backends` / `fetch_channels` / `search_engines`；V1 保持旧字段。
   本版本不做严格校验：未知字段忽略。
-- 本版本 V2 只用于安装与 `extensions list` 展示，运行时跳过；V1 仍是唯一加载路径。
+- V1 与 V2 都进入运行时；V2 的 `fetch_channels` 派生 platform，`search_engines`
+  补展示名，`backends` 注入 `ctx.pluginBackends`。
 - 安装包为单文件 ESM：Release 资产包含实际选中的 manifest、`entry` 指向的文件与
   `SHA256SUMS`；入口可以额外导出 `setup(ctx)`。
 - 安装目录 `<ROOT>/data/extensions/<id>/`，目录存在即视为已安装；插件可写数据在

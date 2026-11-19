@@ -21,6 +21,11 @@ import { restartForConfig } from "../runtime/stack.js";
 import { listExtensions, loadInstalledManifest } from "../../extensions/install.js";
 import type { ExtensionBackend, ExtensionManifest } from "../../extensions/manifest.js";
 import {
+  backendInstallDir,
+  normalizeBackendState,
+  readBackendStates,
+} from "../../extensions/paths.js";
+import {
   runPluginSetup,
   type RunPluginSetupOptions,
   type RunPluginSetupResult,
@@ -157,73 +162,17 @@ export function backendsDir(root: string): string {
   return path.join(root, "data", "backends");
 }
 
-/** P1 插件可写数据目录：`data/extension-data/<id>`（与 setup host 保持一致）。 */
-export function extensionDataDir(root: string, pluginId: string): string {
-  return path.join(root, "data", "extension-data", pluginId);
-}
-
-/** setup host 写入的后端状态文件：`data/extension-data/<id>/backends.json`。 */
-export function backendStateFile(root: string, pluginId: string): string {
-  return path.join(extensionDataDir(root, pluginId), "backends.json");
-}
-
-/** 单个后端的安装目录：`data/extension-data/<id>/backends/<backendId>`。 */
-export function backendInstallDir(
-  root: string,
-  pluginId: string,
-  backendId: string,
-): string {
-  return path.join(extensionDataDir(root, pluginId), "backends", backendId);
-}
-
-export interface BackendStateRead {
-  states: Record<string, unknown>;
-  /** 状态文件不可读/损坏时的告警；调用方决定如何展示。 */
-  warning?: string;
-}
-
-/** 只读状态文件；缺失视为空，损坏只返回告警，不抛异常。 */
-export function readBackendStates(root: string, pluginId: string): BackendStateRead {
-  const file = backendStateFile(root, pluginId);
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { states: {} };
-    return { states: {}, warning: `无法读取 ${file}：${messageOf(error)}` };
-  }
-
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (error) {
-    return { states: {}, warning: `后端状态文件不是合法 JSON：${file}：${messageOf(error)}` };
-  }
-  if (!isRecord(raw)) {
-    return { states: {}, warning: `后端状态文件必须是 JSON 对象：${file}` };
-  }
-  return { states: raw };
-}
-
-export interface BackendStateInfo {
-  installed: boolean;
-  enabled: boolean;
-  version?: string;
-  path?: string;
-}
-
-/** 把状态文件里任意形状的单条记录归一化；缺失/非法值按未安装处理。 */
-export function normalizeBackendState(raw: unknown): BackendStateInfo {
-  if (raw === undefined || raw === null) return { installed: false, enabled: false };
-  if (!isRecord(raw)) return { installed: true, enabled: false };
-
-  const installed = typeof raw.installed === "boolean" ? raw.installed : true;
-  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : installed;
-  const state: BackendStateInfo = { installed, enabled };
-  if (typeof raw.version === "string" && raw.version.length > 0) state.version = raw.version;
-  if (typeof raw.path === "string" && raw.path.length > 0) state.path = raw.path;
-  return state;
-}
+export {
+  backendInstallDir,
+  backendStateFile,
+  extensionDataDir,
+  normalizeBackendState,
+  readBackendStates,
+} from "../../extensions/paths.js";
+export type {
+  BackendStateRead,
+  PluginBackendState as BackendStateInfo,
+} from "../../extensions/paths.js";
 
 interface VersionRecord {
   installed: boolean;

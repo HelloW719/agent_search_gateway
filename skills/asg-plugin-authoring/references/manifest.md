@@ -20,7 +20,8 @@
 | `fetch_channels` | V2 | 否 | 抓取通道声明 |
 | `search_engines` | V2 | 否 | 搜索源声明 |
 
-V2 字段本版本只用于安装与 `asg extensions list` 展示；运行时会跳过 V2 manifest。
+V1 与 V2 都会加载。V2 的 `fetch_channels` 派生 platform，`search_engines` 补展示名；
+声明 `backends` 时，运行时通过 `ctx.pluginBackends` 使用自己安装的后端。
 
 ## 示例（无后端）
 

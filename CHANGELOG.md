@@ -7,7 +7,9 @@
 ### Added
 
 - 插件 manifest `api_version: 2` 支持 `backends`、`fetch_channels`、`search_engines`；入口可选导出 `setup(ctx)`，由插件自行下载、校验、安装所需后端。
-- 新增 `asg-extension.json`（V2 manifest）；安装器优先新文件，缺失时回退 `asg-plugin.json`。本版本 V2 只用于安装与展示，运行时尚未启用。
+- 新增 `asg-extension.json`（V2 manifest）；安装器优先新文件，缺失时回退 `asg-plugin.json`。
+- 实现 V2 runtime：V1/V2 同时加载；`fetch_channels` 派生 fetch platform，`search_engines` 补搜索源展示名。
+- V2 声明 `backends` 时注入 `ctx.pluginBackends`（`ids` / `dir(id)` / `state(id)`），插件运行时直接使用自己安装的后端。
 - `asg extensions list` 输出 `backends` / `fetch_channels` / `search_engines`，新增 CHANNELS / ENGINES 列。
 - setup 宿主：独立子进程 + IPC，提供文件、https 下载、SHA256、解压、命令执行、`extensions.<id>.config`、state 与 backendState 能力。
 - 插件数据目录 `data/extension-data/<id>/`，与 `data/extensions/<id>/` 分离；插件更新不再丢后端。
@@ -17,7 +19,7 @@
 
 ### Changed
 
-- `asg plugins` 降级为兼容 facade：只按已安装 manifest 的 `backends[].id` / `aliases` 解析，未命中回退旧 `scripts/backends/cli.mjs`；`asg extensions` 成为推荐入口。本版本该 facade 不读取 V2 manifest。
+- `asg plugins` 降级为兼容 facade：按已安装 V1/V2 manifest 的 `backends[].id` / `aliases` 解析，未命中回退旧 `scripts/backends/cli.mjs`；`asg extensions` 成为推荐入口。
 - `asg extensions install/setup/remove` 不自动重启网关；`config` / `secret` 写入仍整栈重启。
 - 插件 `config` 写入在 setup 子进程内同样按 `config_schema` 校验，失败不落盘。
 

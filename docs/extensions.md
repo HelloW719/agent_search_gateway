@@ -3,12 +3,13 @@
 本文说明第三方插件（extension）的 manifest、`setup` 钩子、安装/数据目录与
 `asg extensions` 命令。
 
-> **当前范围（过渡版）**：V2 manifest 全字段可以声明、安装和展示；V1 仍是唯一运行时
-> 加载路径。`api_version: 2` 的插件可以安装，但本版本不会加载，日志会提示“V2 尚未启用”。
+> **当前范围**：V1 与 V2 manifest 都会加载。V2 的 `fetch_channels` 用于派生 fetch
+> platform，`search_engines` 用于补搜索源展示名；声明了 `backends` 时，插件运行时
+> 可以通过 `ctx.pluginBackends` 拿到自己安装的后端目录与状态。
 >
 > 后续阶段：
-> 1. 下一版实现 V2 runtime（fetch channels / search engines）；
-> 2. 再下一版启用 V2；
+> 1. 本版本已实现 V2 runtime；
+> 2. 下一版把 V2 作为默认/推荐路径，完成官方插件迁移；
 > 3. 再下一版只保留 V2，V1 直接报错。
 >
 > 本版本不做严格 manifest 校验：未知字段忽略，只保留字段类型、必填项和路径安全约束。
@@ -48,8 +49,7 @@
 1. `asg-extension.json`（V2）
 2. `asg-plugin.json`（V1）
 
-安装 Release 时也按这个顺序选择资产。V1 文件继续可用；V2 文件本版本只用于安装和
-命令展示，不会进入运行时。
+安装 Release 时也按这个顺序选择资产。V1 与 V2 文件都会进入运行时。
 
 | 字段 | 版本 | 必填 | 规则 |
 | --- | --- | --- | --- |
@@ -141,11 +141,10 @@
 
 | 版本 | 本版本行为 |
 | --- | --- |
-| `1` | 正常安装、加载、提供 search / fetch |
-| `2` | 正常安装、`extensions list` 展示全部字段；loader 跳过，日志提示“V2 尚未启用” |
+| `1` | 正常安装、加载、提供 search / fetch；platform 来自 `manifest.platform` |
+| `2` | 正常安装、加载；platform 从 `fetch_channels[0].id` 前缀派生；`search_engines` 补展示名；`backends` 注入 `ctx.pluginBackends` |
 
-下一版实现 V2 runtime，再下一版启用。声明了 `backends` 的插件应在入口导出
-`setup`（见第 5 节）；本版本安装时不会检查该导出。
+声明了 `backends` 的插件应在入口导出 `setup`（见第 5 节）；安装时不会检查该导出。
 
 ## 3. `provides` 的语义
 
@@ -245,12 +244,34 @@ extensions:
 ```ts
 ctx.pluginConfig?: Readonly<Record<string, unknown>>; // 已补默认值并递归冻结
 ctx.pluginSecrets?: Record<string, string>;           // 已解析 env:，空值不注入
+ctx.pluginBackends?: PluginBackends;                  // 仅 V2 声明 backends 时注入
 ```
 
+`pluginBackends` 只有 V2 manifest 声明了 `backends` 才存在：
+
+```ts
+interface PluginBackends {
+  readonly ids: readonly string[];   // manifest 声明的后端 id
+  dir(id: string): string;           // data/extension-data/<id>/backends/<backend-id>
+  state(id: string): PluginBackendState | undefined;
+}
+
+interface PluginBackendState {
+  installed: boolean;
+  enabled: boolean;
+  version?: string;
+  path?: string;
+}
+```
+
+- `dir(id)` 始终返回路径（即使还没安装）；`state(id)` 读取 `backends.json`，并结合
+  后端目录是否存在判断 `installed`。
+- setup 安装完后端后，运行时用同一个 id 取目录；插件不需要自己拼 `data/extension-data`
+  路径。
 - `pluginConfig` 来自 `extensions.<manifest id>.config`；声明了 `config_schema` 时即使
   用户没写配置也会注入补齐默认值后的对象。
 - `pluginSecrets` 合并 `extensions.<manifest id>.<name>` 与旧的
-  `extensions.<engineId>.<name>`，同名时 manifest id 优先。
+  `extensions.<engineId>.<name>`，同名时 manifest id 优先。旧键兼容保留到 0.4.0。
 - fetch 的 `match(url)` **不注入配置**：只能看 URL；`enabled` / `available` / `fetch` 才能读 `ctx.pluginConfig`。
 - `ctx.config` / `ctx.secrets`（fetch 侧是 `ctx.settings` / `ctx.secrets`）是核心内置实现使用的
   配置切片，不属于第三方扩展的稳定契约；第三方扩展只读 `pluginConfig` / `pluginSecrets`。
@@ -704,10 +725,9 @@ JSON（`--json`）的 `data` 包含安装结果、`backends`（manifest 声明�
 `asg plugins list|install|remove` 保留为兼容 facade，帮助文本会提示改用
 `asg extensions install/setup/remove`。行为：
 
-1. **先解析 manifest**：只在 `data/extensions/*/asg-plugin.json`（V1）的
-   `backends[]` 中按 `backend.id` 或 `aliases` 精确匹配；命中后调用该插件的
-   setup（`install` / `uninstall`），成功后整栈重启。V2 的 `asg-extension.json`
-   不属于这个 facade，请直接用 `asg extensions`。
+1. **先解析 manifest**：在 `data/extensions/*/asg-extension.json` 或
+   `asg-plugin.json` 的 `backends[]` 中按 `backend.id` 或 `aliases` 精确匹配；
+   命中后调用该插件的 setup（`install` / `uninstall`），成功后整栈重启。
 2. **未命中回退旧安装器**：调用 `scripts/backends/cli.mjs <name> <action> --root <ROOT> --json`，
    名字原样透传，成功后整栈重启。
 3. 两者都没有：`PLUGIN_UNKNOWN`（退出码 4），提示用 `asg extensions install`。
@@ -767,25 +787,27 @@ export GITHUB_TOKEN=ghp_xxx
 
 1. 发现 `data/extensions/<id>/asg-extension.json`（V2）或 `asg-plugin.json`（V1），
    目录名必须等于 `manifest.id`。
-2. **V2 manifest 本版本不加载**：记录“V2 尚未启用”的 warning 后跳过，fetch / engine
-   都不会注册。下一版实现 V2 runtime，再下一版启用。
-3. V1 继续按现有流程：按 manifest id 读取 `gateway.yaml → extensions.<manifest id>.config`，
+2. 按 manifest id 读取 `gateway.yaml → extensions.<manifest id>.config`，
    用 `config_schema` 校验并补默认值；非法配置直接跳过该插件（不 import 入口）。
-4. 解析 `secrets.yaml → extensions.<id>.<name>`（同时合并旧 `extensions.<engineId>.<name>`，
+3. 解析 `secrets.yaml → extensions.<id>.<name>`（同时合并旧 `extensions.<engineId>.<name>`，
    manifest id 优先），解析 `env:NAME`，空值不注入。
-5. `import()` 安装目录内 `entry` 指向的文件（单个 ESM 文件，不得引用其它插件文件）。
+4. `import()` 安装目录内 `entry` 指向的文件（单个 ESM 文件，不得引用其它插件文件）。
    `setup` 导出不会在加载阶段执行。
-6. 按 `provides` 读取命名导出：
-   - `fetch`：抓取插件对象（`match` / `enabled` / `available` / `fetch`），manifest 覆盖 `id` / `name` / `displayName` / `platform`；
-   - `engine`：搜索源对象（`id` / `group` / `name` / `runtime` 等）。
-7. 注入配置：包装 `enabled` / `available` / `fetch`，把 `pluginConfig`（递归冻结）与
-   `pluginSecrets` 放进 `FetchPluginContext`；search 插件同样注入 `EngineProviderContext`。
-   `match(url)` 保持原函数，不读配置。
+5. 按 `provides` 读取命名导出：
+   - `fetch`：抓取插件对象（`match` / `enabled` / `available` / `fetch`），manifest 覆盖 `id` / `name` / `displayName`；
+     platform 优先级为入口 `platform` > V2 `fetch_channels[0].id` 前缀 > V1 `manifest.platform` > `manifest.id`；
+   - `engine`：搜索源对象（`id` / `group` / `name` / `runtime` 等）；V2 用匹配的
+     `search_engines[].name` 补 `displayName`。
+6. V2 声明了 `backends` 时，构造 `pluginBackends`（`ids` / `dir` / `state`）；
+7. 注入上下文：包装 `enabled` / `available` / `fetch` / `runtime`，把 `pluginConfig`
+   （递归冻结）、`pluginSecrets` 与 `pluginBackends` 放进 `FetchPluginContext` /
+   `EngineProviderContext`。`match(url)` 保持原函数，不读上下文。
 8. 同一批外部插件内 id 重复视为扩展自身错误；重复插件会被跳过并记录错误。
 9. 单个插件加载失败只影响该插件，不影响网关启动与其它插件。
 
-只有声明了 `config_schema`，或存在非空 `config` / 非空密钥 / 路由覆盖 / `secret:` 依赖时，
-provider 才会被包装；没有这些配置的插件保持原对象，行为与插件自身实现完全一致。
+只有声明了 `config_schema`，或存在非空 `config` / 非空密钥 / 路由覆盖 / `secret:` 依赖，
+或 V2 声明了 `backends` 时，provider 才会被包装；没有这些内容的插件保持原对象，
+行为与插件自身实现完全一致。
 
 引擎插件的用户级覆盖进 `extensions` 段，键的语义不同：
 

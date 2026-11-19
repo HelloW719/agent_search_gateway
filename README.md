@@ -607,11 +607,12 @@ asg extensions list                               # BACKENDS 列显示安装状�
 asg extensions remove <id> [--keep-data] [--force]
 ```
 
-V2 manifest（`asg-extension.json`）本版本只用于安装与 `asg extensions list` 展示；
-运行时会跳过并提示“V2 尚未启用”。V1 仍是唯一加载路径。
+V2 manifest（`asg-extension.json`）与 V1 一样会加载。V2 的 `fetch_channels` 用于派生
+platform，`search_engines` 用于补展示名；声明 `backends` 时，插件运行时可以通过
+`ctx.pluginBackends` 拿到自己安装的后端目录与状态。
 
-`asg plugins list|install|remove` 已弃用，仅保留为兼容 facade：只读取 V1
-`asg-plugin.json`，命中 `backend.id` / `aliases` 时走插件 setup，未命中才回退旧的
+`asg plugins list|install|remove` 已弃用，仅保留为兼容 facade：读取已安装的
+V1/V2 manifest，命中 `backend.id` / `aliases` 时走插件 setup，未命中才回退旧的
 `scripts/backends/cli.mjs` 安装器（安装到 `data/backends/<name>/`）。`asg plugins install` /
 `remove` 仍会整栈重启；`asg extensions install` / `setup` / `remove` 不会。
 

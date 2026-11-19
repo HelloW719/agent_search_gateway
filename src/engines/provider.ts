@@ -5,6 +5,7 @@
  * CLI 的 `asg engines` 与运行期搜索分发都会自动看到它。
  */
 
+import type { PluginBackends } from "../extensions/paths.js";
 import type { Logger } from "../logger.js";
 import type { ImageInput, SourceCall } from "../search/sources.js";
 import type { SearxngResult } from "../search/searxng.js";
@@ -19,6 +20,8 @@ export interface EngineProviderContext {
   pluginConfig?: Readonly<Record<string, unknown>>;
   /** 第三方 search 插件密钥（extensions.<id>.<name>，已解析，空值不注入）。 */
   pluginSecrets?: Record<string, string>;
+  /** 第三方 search 插件自己安装的后端；V2 manifest 声明 backends 时注入。 */
+  pluginBackends?: PluginBackends;
   logger?: Logger;
 }
 

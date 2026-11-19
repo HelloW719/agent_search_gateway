@@ -125,6 +125,9 @@ interface SetupContext {
 路径（符号链接逃逸会被拒绝）；`rename` 的源也必须是可写路径。`pluginDir` 与旧后端目录
 只能读。
 
+运行时用 `ctx.pluginBackends.dir(id)` 取同一后端目录，`state(id)` 读安装状态；
+不需要自己拼 `data/extension-data` 路径。
+
 `legacyBackendDir(id)` 的旧目录名可以由宿主映射；当前 CLI 调用不提供映射，通常按
 `backend.id` 解析。不要假设它一定等于 `backend.id`，直接用这个函数取路径。
 

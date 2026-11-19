@@ -27,11 +27,12 @@ export interface EngineProviderContext {
   secrets: Record<string, unknown>;       // 核心内置实现使用
   pluginConfig?: Readonly<Record<string, unknown>>; // 插件私有配置（已补默认值、冻结）
   pluginSecrets?: Record<string, string>;           // 插件密钥（已解析，空值不注入）
+  pluginBackends?: PluginBackends;                  // V2 声明 backends 时注入
   logger?: Logger;
 }
 ```
 
-第三方插件只读 `ctx.pluginConfig` / `ctx.pluginSecrets`。`config` / `secrets` 是宿主给
+第三方插件只读 `ctx.pluginConfig` / `ctx.pluginSecrets` / `ctx.pluginBackends`。`config` / `secrets` 是宿主给
 核心内置 provider 的切片（运行期只有 `{ search, weibo }` 等），不是稳定契约。
 
 `pluginConfig` 来自 `gateway.yaml → extensions.<manifest id>.config`，由 manifest 的

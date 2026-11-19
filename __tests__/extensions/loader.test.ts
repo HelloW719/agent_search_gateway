@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { EngineProvider } from "../../src/engines/provider.js";
 import type { Logger } from "../../src/logger.js";
 import { extensionsDir, loadExtensions } from "../../src/extensions/loader.js";
+import { backendInstallDir, extensionDataDir } from "../../src/extensions/paths.js";
 import { createFetchRegistry } from "../../src/fetch/plugins/index.js";
 
 const tempDirs: string[] = [];
@@ -24,7 +25,9 @@ function writeExtension(
 ): string {
   const dir = path.join(extensionsDir(root), dirName);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "asg-plugin.json"), JSON.stringify(manifest), "utf8");
+  const manifestName =
+    manifest.api_version === 2 ? "asg-extension.json" : "asg-plugin.json";
+  fs.writeFileSync(path.join(dir, manifestName), JSON.stringify(manifest), "utf8");
   fs.writeFileSync(path.join(dir, entryName), entryText, "utf8");
   return dir;
 }
@@ -313,7 +316,7 @@ describe("坏包隔离与校验", () => {
     });
   });
 
-  it("api_version 2 本版本跳过加载，api 1 不受影响", async () => {
+  it("api_version 2 与 api 1 同时加载", async () => {
     const root = tempRoot();
     writeExtension(
       root,
@@ -334,11 +337,9 @@ describe("坏包隔离与校验", () => {
     );
     writeExtension(root, "demo-v1", manifest({ id: "demo-v1" }), FETCH_ENTRY);
 
-    const warnings: string[] = [];
-    const loaded = await loadExtensions(root, { logger: fakeLogger(warnings) });
+    const loaded = await loadExtensions(root);
     expect(loaded.errors).toEqual([]);
-    expect(loaded.fetch.map((plugin) => plugin.id)).toEqual(["demo-v1"]);
-    expect(warnings.join("\n")).toContain("V2 manifest");
+    expect(loaded.fetch.map((plugin) => plugin.id)).toEqual(["demo-v1", "demo-v2"]);
   });
 
   it("缺少 manifest / 条目导入失败时只记录对应错误", async () => {
@@ -872,5 +873,180 @@ describe("密钥键兼容 engineId 与 manifest id", () => {
       extensionSecrets: { "gateway.search:demo": { cookie: "legacy-cookie" } },
     });
     expect(viaLegacy.engines[0]!.available(ctx)).toBe(true);
+  });
+});
+
+describe("V2 runtime", () => {
+  it("V2 fetch 从 fetch_channels 前缀派生 platform", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-v2",
+      manifest({
+        id: "demo-v2",
+        api_version: 2,
+        fetch_channels: [{ id: "example:cli" }, { id: "example:http" }],
+      }),
+      [
+        "export const fetch = {",
+        "  match: () => true,",
+        "  async fetch() { return { ok: true }; },",
+        "};",
+      ].join("\n"),
+    );
+
+    const loaded = await loadExtensions(root);
+    expect(loaded.errors).toEqual([]);
+    expect(loaded.fetch[0]!.platform).toBe("example");
+  });
+
+  it("入口 platform 优先于 fetch_channels 前缀", async () => {
+    const root = tempRoot();
+    writeExtension(
+      root,
+      "demo-v2",
+      manifest({
+        id: "demo-v2",
+        api_version: 2,
+        fetch_channels: [{ id: "example:cli" }],
+      }),
+      FETCH_ENTRY,
+    );
+
+    const loaded = await loadExtensions(root);
+    expect(loaded.fetch[0]!.platform).toBe("example");
+  });
+
+  it("V2 search 用 search_engines 补 displayName", async () => {
+    const root = tempRoot();
+    const entry = ENGINE_ENTRY.replace('  displayName: "Demo 搜索",\n', "");
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({
+        id: "demo-search",
+        name: "Manifest 名称",
+        api_version: 2,
+        provides: ["search"],
+        search_engines: [{ id: "gateway.search:demo", name: "Manifest 搜索" }],
+      }),
+      entry,
+    );
+
+    const loaded = await loadExtensions(root);
+    expect(loaded.errors).toEqual([]);
+    expect(loaded.engines[0]!.displayName).toBe("Manifest 搜索");
+  });
+
+  it("V2 backends 注入 pluginBackends（ids / dir / state）", async () => {
+    const root = tempRoot();
+    const entry = [
+      "export const fetch = {",
+      "  match: () => true,",
+      "  async fetch(url, ctx) {",
+      "    const backends = ctx.pluginBackends;",
+      "    return {",
+      "      ok: true,",
+      "      finalUrl: JSON.stringify({",
+      "        ids: backends?.ids ?? null,",
+      "        dir: backends?.dir('demo-api') ?? null,",
+      "        state: backends?.state('demo-api') ?? null,",
+      "      }),",
+      "    };",
+      "  },",
+      "};",
+    ].join("\n");
+    writeExtension(
+      root,
+      "demo-v2",
+      manifest({
+        id: "demo-v2",
+        api_version: 2,
+        backends: [{ id: "demo-api", name: "Demo API" }],
+      }),
+      entry,
+    );
+
+    const dataDir = extensionDataDir(root, "demo-v2");
+    fs.mkdirSync(path.join(dataDir, "backends", "demo-api"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dataDir, "backends.json"),
+      JSON.stringify({
+        "demo-api": { installed: true, enabled: true, version: "1.2.3" },
+      }),
+      "utf8",
+    );
+
+    const loaded = await loadExtensions(root);
+    const result = await loaded.fetch[0]!.fetch(new URL("https://example.com/a"), {} as never);
+    const info = JSON.parse(result.finalUrl!);
+
+    expect(info.ids).toEqual(["demo-api"]);
+    expect(info.dir).toBe(backendInstallDir(root, "demo-v2", "demo-api"));
+    expect(info.state).toEqual({
+      installed: true,
+      enabled: true,
+      version: "1.2.3",
+      path: backendInstallDir(root, "demo-v2", "demo-api"),
+    });
+  });
+
+  it("V2 search 的 available 能读 pluginBackends 状态", async () => {
+    const root = tempRoot();
+    const entry = [
+      "export const engine = {",
+      '  id: "gateway.search:demo",',
+      '  group: "gateway.search",',
+      '  name: "demo",',
+      '  available: (ctx) => ctx.pluginBackends?.state("demo-api")?.installed === true,',
+      "  runtime: {",
+      '    kind: "search",',
+      "    plan: () => undefined,",
+      "    search: async () => ({ ok: false, error: { kind: 'api', message: 'x' }, latencyMs: 0 }),",
+      "  },",
+      "};",
+    ].join("\n");
+    writeExtension(
+      root,
+      "demo-search",
+      manifest({
+        id: "demo-search",
+        api_version: 2,
+        provides: ["search"],
+        backends: [{ id: "demo-api", name: "Demo API" }],
+      }),
+      entry,
+    );
+
+    const ctx = { config: {}, secrets: {} } as const;
+    const missing = await loadExtensions(root);
+    expect(missing.engines[0]!.available(ctx)).toBe(false);
+
+    const dataDir = extensionDataDir(root, "demo-search");
+    fs.mkdirSync(path.join(dataDir, "backends", "demo-api"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dataDir, "backends.json"),
+      JSON.stringify({ "demo-api": { installed: true, enabled: true } }),
+      "utf8",
+    );
+
+    const installed = await loadExtensions(root);
+    expect(installed.engines[0]!.available(ctx)).toBe(true);
+  });
+
+  it("V1 不注入 pluginBackends", async () => {
+    const root = tempRoot();
+    writeExtension(root, "demo-fetch", manifest(), [
+      "export const fetch = {",
+      "  match: () => true,",
+      "  async fetch(url, ctx) {",
+      "    return { ok: true, finalUrl: String(ctx.pluginBackends === undefined) };",
+      "  },",
+      "};",
+    ].join("\n"));
+
+    const loaded = await loadExtensions(root);
+    const result = await loaded.fetch[0]!.fetch(new URL("https://example.com/a"), {} as never);
+    expect(result.finalUrl).toBe("true");
   });
 });

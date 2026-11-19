@@ -72,15 +72,18 @@ export interface FetchPluginContext {
   logger?: Logger;                    // debug/info/warn/error，可缺省
   pluginConfig?: Readonly<Record<string, unknown>>; // 插件私有配置（已补默认值、冻结）
   pluginSecrets?: Record<string, string>;           // 插件密钥（已解析 env:）
+  pluginBackends?: PluginBackends;                  // V2 声明 backends 时注入
 }
 ```
 
-- **外部插件只读 `pluginConfig` / `pluginSecrets`**；`settings` / `secrets` / `getSecret()`
+- **外部插件只读 `pluginConfig` / `pluginSecrets` / `pluginBackends`**；`settings` / `secrets` / `getSecret()`
   是核心内置实现的切片，字段随核心变化，不保证稳定。
 - `pluginConfig` 来自 `gateway.yaml → extensions.<manifest id>.config`；manifest 声明了
   `config_schema` 时一定注入（含默认值），否则只有非空 `config` 才注入，可能是 `undefined`。
 - `pluginSecrets` 来自 `secrets.yaml → extensions.<manifest id>.<name>`，兼容旧的
   `extensions.<engineId>.<name>`（manifest id 优先）。`env:NAME` 已解析，空值不注入。
+- `pluginBackends` 只在 V2 manifest 声明 `backends` 时存在：`dir(id)` 返回
+  `data/extension-data/<id>/backends/<backend-id>`，`state(id)` 返回安装状态。
 - `match(url)` 不注入配置，只能看 URL；开关与参数放在 `enabled` / `fetch` 里读。
 - 字段名用 snake_case，与 `config_schema` 一致。
 
